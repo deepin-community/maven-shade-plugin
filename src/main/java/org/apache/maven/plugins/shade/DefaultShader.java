@@ -20,93 +20,115 @@ package org.apache.maven.plugins.shade;
  */
 
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.PushbackInputStream;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
 
+import javax.inject.Named;
+import javax.inject.Singleton;
+
+import org.apache.commons.collections4.MultiValuedMap;
+import org.apache.commons.collections4.multimap.HashSetValuedHashMap;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.shade.filter.Filter;
 import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.apache.maven.plugins.shade.resource.ManifestResourceTransformer;
+import org.apache.maven.plugins.shade.resource.ReproducibleResourceTransformer;
 import org.apache.maven.plugins.shade.resource.ResourceTransformer;
-import org.codehaus.plexus.component.annotations.Component;
-import org.codehaus.plexus.logging.AbstractLogEnabled;
 import org.codehaus.plexus.util.IOUtil;
+import org.codehaus.plexus.util.io.CachingOutputStream;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
-
-
-import com.google.common.base.Joiner;
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * @author Jason van Zyl
  */
-@Component( role = Shader.class, hint = "default" )
+@Singleton
+@Named
 public class DefaultShader
-    extends AbstractLogEnabled
     implements Shader
 {
+    private static final int BUFFER_SIZE = 32 * 1024;
+
+    private final Logger logger;
+
+    public DefaultShader()
+    {
+        this( LoggerFactory.getLogger( DefaultShader.class ) );
+    }
+
+    public DefaultShader( final Logger logger )
+    {
+        this.logger = Objects.requireNonNull( logger );
+    }
 
     public void shade( ShadeRequest shadeRequest )
         throws IOException, MojoExecutionException
     {
-        Set<String> resources = new HashSet<String>();
+        Set<String> resources = new HashSet<>();
 
-        ResourceTransformer manifestTransformer = null;
+        ManifestResourceTransformer manifestTransformer = null;
         List<ResourceTransformer> transformers =
-            new ArrayList<ResourceTransformer>( shadeRequest.getResourceTransformers() );
+            new ArrayList<>( shadeRequest.getResourceTransformers() );
         for ( Iterator<ResourceTransformer> it = transformers.iterator(); it.hasNext(); )
         {
             ResourceTransformer transformer = it.next();
             if ( transformer instanceof ManifestResourceTransformer )
             {
-                manifestTransformer = transformer;
+                manifestTransformer = (ManifestResourceTransformer) transformer;
                 it.remove();
             }
         }
 
-        RelocatorRemapper remapper = new RelocatorRemapper( shadeRequest.getRelocators() );
+        final DefaultPackageMapper packageMapper = new DefaultPackageMapper( shadeRequest.getRelocators() );
 
         // noinspection ResultOfMethodCallIgnored
         shadeRequest.getUberJar().getParentFile().mkdirs();
 
-        JarOutputStream out = null;
-        try
+        try ( JarOutputStream out  =
+                  new JarOutputStream( new BufferedOutputStream(
+                          new CachingOutputStream( shadeRequest.getUberJar() ) ) ) )
         {
-            out = new JarOutputStream( new BufferedOutputStream( new FileOutputStream( shadeRequest.getUberJar() ) ) );
             goThroughAllJarEntriesForManifestTransformer( shadeRequest, resources, manifestTransformer, out );
 
             // CHECKSTYLE_OFF: MagicNumber
-            Multimap<String, File> duplicates = HashMultimap.create( 10000, 3 );
+            MultiValuedMap<String, File> duplicates = new HashSetValuedHashMap<>( 10000, 3 );
             // CHECKSTYLE_ON: MagicNumber
 
-            shadeJars( shadeRequest, resources, transformers, remapper, out, duplicates );
+            shadeJars( shadeRequest, resources, transformers, out, duplicates, packageMapper );
 
             // CHECKSTYLE_OFF: MagicNumber
-            Multimap<Collection<File>, String> overlapping = HashMultimap.create( 20, 15 );
+            MultiValuedMap<Collection<File>, String> overlapping = new HashSetValuedHashMap<>( 20, 15 );
             // CHECKSTYLE_ON: MagicNumber
 
             for ( String clazz : duplicates.keySet() )
@@ -133,13 +155,6 @@ public class DefaultShader
                     transformer.modifyOutputStream( out );
                 }
             }
-
-            out.close();
-            out = null;
-        }
-        finally
-        {
-            IOUtil.close( out );
         }
 
         for ( Filter filter : shadeRequest.getFilters() )
@@ -148,20 +163,81 @@ public class DefaultShader
         }
     }
 
+    /**
+     * {@link InputStream} that can peek ahead at zip header bytes.
+     */
+    private static class ZipHeaderPeekInputStream extends PushbackInputStream
+    {
+
+        private static final byte[] ZIP_HEADER = new byte[] {0x50, 0x4b, 0x03, 0x04};
+
+        private static final int HEADER_LEN = 4;
+
+        protected ZipHeaderPeekInputStream( InputStream in )
+        {
+            super( in, HEADER_LEN );
+        }
+
+        public boolean hasZipHeader() throws IOException
+        {
+            final byte[] header = new byte[HEADER_LEN];
+            int len = super.read( header, 0, HEADER_LEN );
+            if ( len != -1 )
+            {
+                super.unread( header, 0, len );
+            }
+            return Arrays.equals( header, ZIP_HEADER );
+        }
+    }
+
+    /**
+     * Data holder for CRC and Size.
+     */
+    private static class CrcAndSize
+    {
+
+        private final CRC32 crc = new CRC32();
+
+        private long size;
+
+        CrcAndSize( InputStream inputStream ) throws IOException
+        {
+            load( inputStream );
+        }
+
+        private void load( InputStream inputStream ) throws IOException
+        {
+            byte[] buffer = new byte[BUFFER_SIZE];
+            int bytesRead;
+            while ( ( bytesRead = inputStream.read( buffer ) ) != -1 )
+            {
+                this.crc.update( buffer, 0, bytesRead );
+                this.size += bytesRead;
+            }
+        }
+
+        public void setupStoredEntry( JarEntry entry )
+        {
+            entry.setSize( this.size );
+            entry.setCompressedSize( this.size );
+            entry.setCrc( this.crc.getValue() );
+            entry.setMethod( ZipEntry.STORED );
+        }
+    }
+
     private void shadeJars( ShadeRequest shadeRequest, Set<String> resources, List<ResourceTransformer> transformers,
-                            RelocatorRemapper remapper, JarOutputStream jos, Multimap<String, File> duplicates )
-        throws IOException, MojoExecutionException
+                            JarOutputStream jos, MultiValuedMap<String, File> duplicates,
+                            DefaultPackageMapper packageMapper )
+        throws IOException
     {
         for ( File jar : shadeRequest.getJars() )
         {
 
-            getLogger().debug( "Processing JAR " + jar );
+            logger.debug( "Processing JAR " + jar );
 
             List<Filter> jarFilters = getFilters( jar, shadeRequest.getFilters() );
 
-            JarFile jarFile = newJarFile( jar );
-
-            try
+            try ( JarFile jarFile = newJarFile( jar ) )
             {
 
                 for ( Enumeration<JarEntry> j = jarFile.entries(); j.hasMoreElements(); )
@@ -169,6 +245,12 @@ public class DefaultShader
                     JarEntry entry = j.nextElement();
 
                     String name = entry.getName();
+                    
+                    if ( entry.isDirectory() || isFiltered( jarFilters, name ) )
+                    {
+                        continue;
+                    }
+
 
                     if ( "META-INF/INDEX.LIST".equals( name ) )
                     {
@@ -177,48 +259,39 @@ public class DefaultShader
                         // later
                         continue;
                     }
-                    
+
                     if ( "module-info.class".equals( name ) )
                     {
-                        getLogger().warn( "Discovered module-info.class. "
+                        logger.warn( "Discovered module-info.class. "
                             + "Shading will break its strong encapsulation." );
                         continue;
                     }
 
-                    if ( !entry.isDirectory() && !isFiltered( jarFilters, name ) )
+                    try
                     {
-                        try
-                        {
-                            shadeSingleJar( shadeRequest, resources, transformers, remapper, jos, duplicates, jar,
-                                            jarFile, entry, name );
-                        }
-                        catch ( Exception e )
-                        {
-                            throw new IOException( String.format( "Problem shading JAR %s entry %s: %s", jar, name, e ),
-                                                   e );
-                        }
+                        shadeJarEntry( shadeRequest, resources, transformers, packageMapper, jos, duplicates, jar,
+                                        jarFile, entry, name );
+                    }
+                    catch ( Exception e )
+                    {
+                        throw new IOException( String.format( "Problem shading JAR %s entry %s: %s", jar, name, e ),
+                                               e );
                     }
                 }
 
             }
-            finally
-            {
-                jarFile.close();
-            }
         }
     }
 
-    private void shadeSingleJar( ShadeRequest shadeRequest, Set<String> resources,
-                                 List<ResourceTransformer> transformers, RelocatorRemapper remapper,
-                                 JarOutputStream jos, Multimap<String, File> duplicates, File jar, JarFile jarFile,
-                                 JarEntry entry, String name )
+    private void shadeJarEntry( ShadeRequest shadeRequest, Set<String> resources,
+                                 List<ResourceTransformer> transformers, DefaultPackageMapper packageMapper,
+                                 JarOutputStream jos, MultiValuedMap<String, File> duplicates, File jar,
+                                 JarFile jarFile, JarEntry entry, String name )
         throws IOException, MojoExecutionException
     {
-        InputStream in = null;
-        try
+        try ( InputStream in = jarFile.getInputStream( entry ) )
         {
-            in = jarFile.getInputStream( entry );
-            String mappedName = remapper.map( name );
+            String mappedName = packageMapper.map( name, true, false );
 
             int idx = mappedName.lastIndexOf( '/' );
             if ( idx != -1 )
@@ -227,14 +300,14 @@ public class DefaultShader
                 String dir = mappedName.substring( 0, idx );
                 if ( !resources.contains( dir ) )
                 {
-                    addDirectory( resources, jos, dir );
+                    addDirectory( resources, jos, dir, entry.getTime() );
                 }
             }
 
+            duplicates.put( name, jar );
             if ( name.endsWith( ".class" ) )
             {
-                duplicates.put( name, jar );
-                addRemappedClass( remapper, jos, jar, name, in );
+                addRemappedClass( jos, jar, name, entry.getTime(), in, packageMapper );
             }
             else if ( shadeRequest.isShadeSourcesContent() && name.endsWith( ".java" ) )
             {
@@ -244,33 +317,32 @@ public class DefaultShader
                     return;
                 }
 
-                addJavaSource( resources, jos, mappedName, in, shadeRequest.getRelocators() );
+                addJavaSource( resources, jos, mappedName, entry.getTime(), in, shadeRequest.getRelocators() );
             }
             else
             {
-                if ( !resourceTransformed( transformers, mappedName, in, shadeRequest.getRelocators() ) )
+                if ( !resourceTransformed( transformers, mappedName, in, shadeRequest.getRelocators(),
+                                           entry.getTime() ) )
                 {
                     // Avoid duplicates that aren't accounted for by the resource transformers
                     if ( resources.contains( mappedName ) )
                     {
+                        logger.debug( "We have a duplicate " + name + " in " + jar );
                         return;
                     }
 
-                    addResource( resources, jos, mappedName, entry.getTime(), in );
+                    addResource( resources, jos, mappedName, entry, jarFile );
+                }
+                else
+                {
+                    duplicates.removeMapping( name, jar );
                 }
             }
-
-            in.close();
-            in = null;
-        }
-        finally
-        {
-            IOUtil.close( in );
         }
     }
 
     private void goThroughAllJarEntriesForManifestTransformer( ShadeRequest shadeRequest, Set<String> resources,
-                                                               ResourceTransformer manifestTransformer,
+                                                               ManifestResourceTransformer manifestTransformer,
                                                                JarOutputStream jos )
         throws IOException
     {
@@ -278,8 +350,7 @@ public class DefaultShader
         {
             for ( File jar : shadeRequest.getJars() )
             {
-                JarFile jarFile = newJarFile( jar );
-                try
+                try ( JarFile jarFile = newJarFile( jar ) )
                 {
                     for ( Enumeration<JarEntry> en = jarFile.entries(); en.hasMoreElements(); )
                     {
@@ -288,23 +359,14 @@ public class DefaultShader
                         if ( manifestTransformer.canTransformResource( resource ) )
                         {
                             resources.add( resource );
-                            InputStream inputStream = jarFile.getInputStream( entry );
-                            try
+                            try ( InputStream inputStream = jarFile.getInputStream( entry ) )
                             {
                                 manifestTransformer.processResource( resource, inputStream,
-                                                                     shadeRequest.getRelocators() );
-                            }
-                            finally
-                            {
-                                inputStream.close();
+                                                                     shadeRequest.getRelocators(), entry.getTime() );
                             }
                             break;
                         }
                     }
-                }
-                finally
-                {
-                    jarFile.close();
                 }
             }
             if ( manifestTransformer.hasTransformedResource() )
@@ -316,48 +378,89 @@ public class DefaultShader
 
     private void showOverlappingWarning()
     {
-        getLogger().warn( "maven-shade-plugin has detected that some class files are" );
-        getLogger().warn( "present in two or more JARs. When this happens, only one" );
-        getLogger().warn( "single version of the class is copied to the uber jar." );
-        getLogger().warn( "Usually this is not harmful and you can skip these warnings," );
-        getLogger().warn( "otherwise try to manually exclude artifacts based on" );
-        getLogger().warn( "mvn dependency:tree -Ddetail=true and the above output." );
-        getLogger().warn( "See http://maven.apache.org/plugins/maven-shade-plugin/" );
+        logger.warn( "maven-shade-plugin has detected that some class files are" );
+        logger.warn( "present in two or more JARs. When this happens, only one" );
+        logger.warn( "single version of the class is copied to the uber jar." );
+        logger.warn( "Usually this is not harmful and you can skip these warnings," );
+        logger.warn( "otherwise try to manually exclude artifacts based on" );
+        logger.warn( "mvn dependency:tree -Ddetail=true and the above output." );
+        logger.warn( "See https://maven.apache.org/plugins/maven-shade-plugin/" );
     }
 
-    private void logSummaryOfDuplicates( Multimap<Collection<File>, String> overlapping )
+    private void logSummaryOfDuplicates( MultiValuedMap<Collection<File>, String> overlapping )
     {
         for ( Collection<File> jarz : overlapping.keySet() )
         {
-            List<String> jarzS = new LinkedList<String>();
+            List<String> jarzS = new ArrayList<>();
 
             for ( File jjar : jarz )
             {
                 jarzS.add( jjar.getName() );
             }
 
-            List<String> classes = new LinkedList<String>();
+            Collections.sort( jarzS ); // deterministic messages to be able to compare outputs (useful on CI)
 
-            for ( String clazz : overlapping.get( jarz ) )
+            List<String> classes = new LinkedList<>();
+            List<String> resources = new LinkedList<>();
+
+            for ( String name : overlapping.get( jarz ) )
             {
-                classes.add( clazz.replace( ".class", "" ).replace( "/", "." ) );
+                if ( name.endsWith( ".class" ) )
+                {
+                    classes.add( name.replace( ".class", "" ).replace( "/", "." ) );
+                }
+                else
+                {
+                    resources.add( name );
+                }
             }
 
             //CHECKSTYLE_OFF: LineLength
-            getLogger().warn(
-                Joiner.on( ", " ).join( jarzS ) + " define " + classes.size() + " overlapping classes: " );
+            final Collection<String> overlaps = new ArrayList<>();
+            if ( !classes.isEmpty() )
+            {
+                if ( resources.size() == 1 )
+                {
+                    overlaps.add( "class" );
+                }
+                else
+                {
+                    overlaps.add( "classes" );
+                }
+            }
+            if ( !resources.isEmpty() )
+            {
+                if ( resources.size() == 1 )
+                {
+                    overlaps.add( "resource" );
+                }
+                else
+                {
+                    overlaps.add( "resources" );
+                }
+            }
+
+            final List<String> all = new ArrayList<>( classes.size() + resources.size() );
+            all.addAll( classes );
+            all.addAll( resources );
+
+            logger.warn(
+                String.join( ", ", jarzS ) + " define " + all.size()
+                + " overlapping " + String.join( " and ", overlaps ) + ": " );
             //CHECKSTYLE_ON: LineLength
+
+            Collections.sort( all );
 
             int max = 10;
 
-            for ( int i = 0; i < Math.min( max, classes.size() ); i++ )
+            for ( int i = 0; i < Math.min( max, all.size() ); i++ )
             {
-                getLogger().warn( "  - " + classes.get( i ) );
+                logger.warn( "  - " + all.get( i ) );
             }
 
-            if ( classes.size() > max )
+            if ( all.size() > max )
             {
-                getLogger().warn( "  - " + ( classes.size() - max ) + " more..." );
+                logger.warn( "  - " + ( all.size() - max ) + " more..." );
             }
 
         }
@@ -380,7 +483,7 @@ public class DefaultShader
 
     private List<Filter> getFilters( File jar, List<Filter> filters )
     {
-        List<Filter> list = new ArrayList<Filter>();
+        List<Filter> list = new ArrayList<>();
 
         for ( Filter filter : filters )
         {
@@ -394,7 +497,7 @@ public class DefaultShader
         return list;
     }
 
-    private void addDirectory( Set<String> resources, JarOutputStream jos, String name )
+    private void addDirectory( Set<String> resources, JarOutputStream jos, String name, long time )
         throws IOException
     {
         if ( name.lastIndexOf( '/' ) > 0 )
@@ -402,37 +505,45 @@ public class DefaultShader
             String parent = name.substring( 0, name.lastIndexOf( '/' ) );
             if ( !resources.contains( parent ) )
             {
-                addDirectory( resources, jos, parent );
+                addDirectory( resources, jos, parent, time );
             }
         }
 
         // directory entries must end in "/"
         JarEntry entry = new JarEntry( name + "/" );
+        entry.setTime( time );
         jos.putNextEntry( entry );
 
         resources.add( name );
     }
 
-    private void addRemappedClass( RelocatorRemapper remapper, JarOutputStream jos, File jar, String name,
-                                   InputStream is )
+    private void addRemappedClass( JarOutputStream jos, File jar, String name,
+                                   long time, InputStream is, DefaultPackageMapper packageMapper )
         throws IOException, MojoExecutionException
     {
-        if ( !remapper.hasRelocators() )
+        if ( packageMapper.relocators.isEmpty() )
         {
             try
             {
-                jos.putNextEntry( new JarEntry( name ) );
+                JarEntry entry = new JarEntry( name );
+                entry.setTime( time );
+                jos.putNextEntry( entry );
                 IOUtil.copy( is, jos );
             }
             catch ( ZipException e )
             {
-                getLogger().debug( "We have a duplicate " + name + " in " + jar );
+                logger.debug( "We have a duplicate " + name + " in " + jar );
             }
 
             return;
         }
-
-        ClassReader cr = new ClassReader( is );
+        
+        // Keep the original class in, in case nothing was relocated by RelocatorRemapper. This avoids binary
+        // differences between classes, simply because they were rewritten and only details like constant pool or
+        // stack map frames are slightly different.
+        byte[] originalClass = IOUtil.toByteArray( is );
+        
+        ClassReader cr = new ClassReader( new ByteArrayInputStream( originalClass ) );
 
         // We don't pass the ClassReader here. This forces the ClassWriter to rebuild the constant pool.
         // Copying the original constant pool should be avoided because it would keep references
@@ -442,24 +553,7 @@ public class DefaultShader
         ClassWriter cw = new ClassWriter( 0 );
 
         final String pkg = name.substring( 0, name.lastIndexOf( '/' ) + 1 );
-        ClassVisitor cv = new ClassRemapper( cw, remapper )
-        {
-            @Override
-            public void visitSource( final String source, final String debug )
-            {
-                if ( source == null )
-                {
-                    super.visitSource( source, debug );
-                }
-                else
-                {
-                    final String fqSource = pkg + source;
-                    final String mappedSource = remapper.map( fqSource );
-                    final String filename = mappedSource.substring( mappedSource.lastIndexOf( '/' ) + 1 );
-                    super.visitSource( filename, debug );
-                }
-            }
-        };
+        final ShadeClassRemapper cv = new ShadeClassRemapper( cw, pkg, packageMapper );
 
         try
         {
@@ -470,21 +564,34 @@ public class DefaultShader
             throw new MojoExecutionException( "Error in ASM processing class " + name, ise );
         }
 
-        byte[] renamedClass = cw.toByteArray();
+        // If nothing was relocated by RelocatorRemapper, write the original class, otherwise the transformed one
+        final byte[] renamedClass;
+        if ( cv.remapped )
+        {
+            logger.debug( "Rewrote class bytecode: " + name );
+            renamedClass = cw.toByteArray();
+        }
+        else
+        {
+            logger.debug( "Keeping original class bytecode: " + name );
+            renamedClass = originalClass;
+        }
 
         // Need to take the .class off for remapping evaluation
-        String mappedName = remapper.map( name.substring( 0, name.indexOf( '.' ) ) );
+        String mappedName = packageMapper.map( name.substring( 0, name.indexOf( '.' ) ), true, false );
 
         try
         {
             // Now we put it back on so the class file is written out with the right extension.
-            jos.putNextEntry( new JarEntry( mappedName + ".class" ) );
+            JarEntry entry = new JarEntry( mappedName + ".class" );
+            entry.setTime( time );
+            jos.putNextEntry( entry );
 
-            IOUtil.copy( renamedClass, jos );
+            jos.write( renamedClass );
         }
         catch ( ZipException e )
         {
-            getLogger().debug( "We have a duplicate " + mappedName + " in " + jar );
+            logger.debug( "We have a duplicate " + mappedName + " in " + jar );
         }
     }
 
@@ -502,7 +609,7 @@ public class DefaultShader
     }
 
     private boolean resourceTransformed( List<ResourceTransformer> resourceTransformers, String name, InputStream is,
-                                         List<Relocator> relocators )
+                                         List<Relocator> relocators, long time )
         throws IOException
     {
         boolean resourceTransformed = false;
@@ -511,9 +618,16 @@ public class DefaultShader
         {
             if ( transformer.canTransformResource( name ) )
             {
-                getLogger().debug( "Transforming " + name + " using " + transformer.getClass().getName() );
+                logger.debug( "Transforming " + name + " using " + transformer.getClass().getName() );
 
-                transformer.processResource( name, is, relocators );
+                if ( transformer instanceof ReproducibleResourceTransformer )
+                {
+                    ( (ReproducibleResourceTransformer) transformer ).processResource( name, is, relocators, time );
+                }
+                else
+                {
+                    transformer.processResource( name, is, relocators );
+                }
 
                 resourceTransformed = true;
 
@@ -523,124 +637,197 @@ public class DefaultShader
         return resourceTransformed;
     }
 
-    private void addJavaSource( Set<String> resources, JarOutputStream jos, String name, InputStream is,
+    private void addJavaSource( Set<String> resources, JarOutputStream jos, String name, long time, InputStream is,
                                 List<Relocator> relocators )
         throws IOException
     {
-        jos.putNextEntry( new JarEntry( name ) );
+        JarEntry entry = new JarEntry( name );
+        entry.setTime( time );
+        jos.putNextEntry( entry );
 
-        String sourceContent = IOUtil.toString( new InputStreamReader( is, "UTF-8" ) );
+        String sourceContent = IOUtil.toString( new InputStreamReader( is, StandardCharsets.UTF_8 ) );
 
         for ( Relocator relocator : relocators )
         {
             sourceContent = relocator.applyToSourceContent( sourceContent );
         }
 
-        final Writer writer = new OutputStreamWriter( jos, "UTF-8" );
-        IOUtil.copy( sourceContent, writer );
+        final Writer writer = new OutputStreamWriter( jos, StandardCharsets.UTF_8 );
+        writer.write( sourceContent );
         writer.flush();
 
         resources.add( name );
     }
 
-    private void addResource( Set<String> resources, JarOutputStream jos, String name, long lastModified,
-                              InputStream is )
-        throws IOException
+    private void addResource( Set<String> resources, JarOutputStream jos, String name, JarEntry originalEntry,
+                              JarFile jarFile ) throws IOException
     {
-        final JarEntry jarEntry = new JarEntry( name );
+        ZipHeaderPeekInputStream inputStream = new ZipHeaderPeekInputStream( jarFile.getInputStream( originalEntry ) );
+        try
+        {
+            final JarEntry entry = new JarEntry( name );
 
-        jarEntry.setTime( lastModified );
+            // We should not change compressed level of uncompressed entries, otherwise JVM can't load these nested jars
+            if ( inputStream.hasZipHeader() && originalEntry.getMethod() == ZipEntry.STORED )
+            {
+                new CrcAndSize( inputStream ).setupStoredEntry( entry );
+                inputStream.close();
+                inputStream = new ZipHeaderPeekInputStream( jarFile.getInputStream( originalEntry ) );
+            }
 
-        jos.putNextEntry( jarEntry );
 
-        IOUtil.copy( is, jos );
+            entry.setTime( originalEntry.getTime() );
 
-        resources.add( name );
+            jos.putNextEntry( entry );
+
+            IOUtil.copy( inputStream, jos );
+
+            resources.add( name );
+        }
+        finally
+        {
+            inputStream.close();
+        }
     }
 
-    static class RelocatorRemapper
-        extends Remapper
+    private interface PackageMapper
     {
+        /**
+         * Map an entity name according to the mapping rules known to this package mapper
+         * 
+         * @param entityName entity name to be mapped
+         * @param mapPaths map "slashy" names like paths or internal Java class names, e.g. {@code com/acme/Foo}?
+         * @param mapPackages  map "dotty" names like qualified Java class or package names, e.g. {@code com.acme.Foo}?
+         * @return mapped entity name, e.g. {@code org/apache/acme/Foo} or {@code org.apache.acme.Foo}
+         */
+        String map( String entityName, boolean mapPaths, boolean mapPackages );
+    }
 
-        private final Pattern classPattern = Pattern.compile( "(\\[*)?L(.+);" );
+    /**
+     * A package mapper based on a list of {@link Relocator}s
+     */
+    private static class DefaultPackageMapper implements PackageMapper
+    {
+        private static final Pattern CLASS_PATTERN = Pattern.compile( "(\\[*)?L(.+);" );
 
-        List<Relocator> relocators;
+        private final List<Relocator> relocators;
 
-        RelocatorRemapper( List<Relocator> relocators )
+        private DefaultPackageMapper( final List<Relocator> relocators )
         {
             this.relocators = relocators;
         }
 
-        public boolean hasRelocators()
+        @Override
+        public String map( String entityName, boolean mapPaths, final boolean mapPackages )
         {
-            return !relocators.isEmpty();
-        }
-
-        public Object mapValue( Object object )
-        {
-            if ( object instanceof String )
-            {
-                String name = (String) object;
-                String value = name;
-
-                String prefix = "";
-                String suffix = "";
-
-                Matcher m = classPattern.matcher( name );
-                if ( m.matches() )
-                {
-                    prefix = m.group( 1 ) + "L";
-                    suffix = ";";
-                    name = m.group( 2 );
-                }
-
-                for ( Relocator r : relocators )
-                {
-                    if ( r.canRelocateClass( name ) )
-                    {
-                        value = prefix + r.relocateClass( name ) + suffix;
-                        break;
-                    }
-                    else if ( r.canRelocatePath( name ) )
-                    {
-                        value = prefix + r.relocatePath( name ) + suffix;
-                        break;
-                    }
-                }
-
-                return value;
-            }
-
-            return super.mapValue( object );
-        }
-
-        public String map( String name )
-        {
-            String value = name;
+            String value = entityName;
 
             String prefix = "";
             String suffix = "";
 
-            Matcher m = classPattern.matcher( name );
+            Matcher m = CLASS_PATTERN.matcher( entityName );
             if ( m.matches() )
             {
                 prefix = m.group( 1 ) + "L";
                 suffix = ";";
-                name = m.group( 2 );
+                entityName = m.group( 2 );
             }
 
             for ( Relocator r : relocators )
             {
-                if ( r.canRelocatePath( name ) )
+                if ( mapPackages && r.canRelocateClass( entityName ) )
                 {
-                    value = prefix + r.relocatePath( name ) + suffix;
+                    value = prefix + r.relocateClass( entityName ) + suffix;
+                    break;
+                }
+                else if ( mapPaths && r.canRelocatePath( entityName ) )
+                {
+                    value = prefix + r.relocatePath( entityName ) + suffix;
                     break;
                 }
             }
-
             return value;
         }
-
     }
 
+    private static class LazyInitRemapper extends Remapper
+    {
+        private PackageMapper relocators;
+
+        @Override
+        public Object mapValue( Object object )
+        {
+            return object instanceof String
+                    ? relocators.map( (String) object, true, true )
+                    : super.mapValue( object );
+        }
+
+        @Override
+        public String map( String name )
+        {
+            // NOTE: Before the factoring out duplicate code from 'private String map(String, boolean)', this method did
+            // the same as 'mapValue', except for not trying to replace "dotty" package-like patterns (only "slashy"
+            // path-like ones). The refactoring retains this difference. But actually, all unit and integration tests
+            // still pass, if both variants are unified into one which always tries to replace both pattern types.
+            //
+            //  TODO: Analyse if this case is really necessary and has any special meaning or avoids any known problems.
+            //   If not, then simplify DefaultShader.PackageMapper.map to only have the String parameter and assume
+            //   both boolean ones to always be true.
+            return relocators.map( name, true, false );
+        }
+    }
+
+    // TODO: we can avoid LazyInitRemapper N instantiations (and use a singleton)
+    //       reimplementing ClassRemapper there.
+    //       It looks a bad idea but actually enables us to respect our relocation API which has no
+    //       consistency with ASM one which can lead to multiple issues for short relocation patterns
+    //       plus overcome ClassRemapper limitations we can care about (see its javadoc for details).
+    //
+    // NOTE: very short term we can just reuse the same LazyInitRemapper and let the constructor set it.
+    //       since multithreading is not faster in this processing it would be more than sufficient if
+    //       caring of this 2 objects per class allocation (but keep in mind the visitor will allocate way more ;)).
+    //       Last point which makes it done this way as of now is that perf seems not impacted at all.
+    private static class ShadeClassRemapper extends ClassRemapper implements PackageMapper
+    {
+        private final String pkg;
+        private final PackageMapper packageMapper;
+        private boolean remapped;
+
+        ShadeClassRemapper( final ClassVisitor classVisitor, final String pkg,
+                            final DefaultPackageMapper packageMapper )
+        {
+            super( classVisitor, new LazyInitRemapper() /* can't be init in the constructor with "this" */ );
+            this.pkg = pkg;
+            this.packageMapper = packageMapper;
+
+            // use this to enrich relocators impl with "remapped" logic
+            LazyInitRemapper.class.cast( remapper ).relocators = this;
+        }
+
+        @Override
+        public void visitSource( final String source, final String debug )
+        {
+            if ( source == null )
+            {
+                super.visitSource( null, debug );
+                return;
+            }
+
+            final String fqSource = pkg + source;
+            final String mappedSource = map( fqSource, true, false );
+            final String filename = mappedSource.substring( mappedSource.lastIndexOf( '/' ) + 1 );
+            super.visitSource( filename, debug );
+        }
+
+        @Override
+        public String map( final String entityName, boolean mapPaths, final boolean mapPackages )
+        {
+            final String mapped = packageMapper.map( entityName, true, mapPackages );
+            if ( !remapped )
+            {
+                remapped = !mapped.equals( entityName );
+            }
+            return mapped;
+        }
+    }
 }

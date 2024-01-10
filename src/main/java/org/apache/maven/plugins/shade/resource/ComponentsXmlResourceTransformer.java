@@ -20,7 +20,6 @@ package org.apache.maven.plugins.shade.resource;
  */
 
 import org.apache.maven.plugins.shade.relocation.Relocator;
-import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.ReaderFactory;
 import org.codehaus.plexus.util.WriterFactory;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
@@ -43,9 +42,11 @@ import java.util.jar.JarOutputStream;
  * A resource processor that aggregates plexus <code>components.xml</code> files.
  */
 public class ComponentsXmlResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
-    private Map<String, Xpp3Dom> components = new LinkedHashMap<String, Xpp3Dom>();
+    private Map<String, Xpp3Dom> components = new LinkedHashMap<>();
+
+    private long time = Long.MIN_VALUE;
 
     public static final String COMPONENTS_XML_PATH = "META-INF/plexus/components.xml";
 
@@ -54,7 +55,7 @@ public class ComponentsXmlResourceTransformer
         return COMPONENTS_XML_PATH.equals( resource );
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         Xpp3Dom newDom;
@@ -76,7 +77,7 @@ public class ComponentsXmlResourceTransformer
         }
         catch ( Exception e )
         {
-            throw (IOException) new IOException( "Error parsing components.xml in " + is ).initCause( e );
+            throw new IOException( "Error parsing components.xml in " + is, e );
         }
 
         // Only try to merge in components if there are some elements in the component-set
@@ -127,16 +128,24 @@ public class ComponentsXmlResourceTransformer
 
             components.put( key, component );
         }
+
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public void modifyOutputStream( JarOutputStream jos )
         throws IOException
     {
+        JarEntry jarEntry = new JarEntry( COMPONENTS_XML_PATH );
+        jarEntry.setTime( time );
+
         byte[] data = getTransformedResource();
 
-        jos.putNextEntry( new JarEntry( COMPONENTS_XML_PATH ) );
+        jos.putNextEntry( jarEntry );
 
-        IOUtil.copy( data, jos );
+        jos.write( data );
 
         components.clear();
     }
@@ -151,8 +160,7 @@ public class ComponentsXmlResourceTransformer
     {
         ByteArrayOutputStream baos = new ByteArrayOutputStream( 1024 * 4 );
 
-        Writer writer = WriterFactory.newXmlWriter( baos );
-        try
+        try ( Writer writer = WriterFactory.newXmlWriter( baos ) )
         {
             Xpp3Dom dom = new Xpp3Dom( "component-set" );
 
@@ -166,13 +174,6 @@ public class ComponentsXmlResourceTransformer
             }
 
             Xpp3DomWriter.write( writer, dom );
-
-            writer.close();
-            writer = null;
-        }
-        finally
-        {
-            IOUtil.close( writer );
         }
 
         return baos.toByteArray();

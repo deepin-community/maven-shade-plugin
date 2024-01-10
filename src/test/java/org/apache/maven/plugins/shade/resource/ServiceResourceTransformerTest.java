@@ -27,7 +27,10 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -38,54 +41,127 @@ import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.apache.maven.plugins.shade.relocation.SimpleRelocator;
 import org.junit.Test;
 
-import com.google.common.collect.Lists;
-
 /**
  * Test for handling META-INF/service/...
  */
 public class ServiceResourceTransformerTest {
+    private final String NEWLINE = "\n";
+
+    private List<Relocator> relocators = new ArrayList<Relocator>();
 
     @Test
     public void relocatedClasses() throws Exception {
         SimpleRelocator relocator =
             new SimpleRelocator( "org.foo", "borg.foo", null, Arrays.asList( "org.foo.exclude.*" ) );
-        List<Relocator> relocators = Lists.<Relocator>newArrayList( relocator );
+        relocators.add( relocator );
 
         String content = "org.foo.Service\norg.foo.exclude.OtherService\n";
-        byte[] contentBytes = content.getBytes( "UTF-8" );
+        byte[] contentBytes = content.getBytes( StandardCharsets.UTF_8 );
         InputStream contentStream = new ByteArrayInputStream( contentBytes );
         String contentResource = "META-INF/services/org.foo.something.another";
         String contentResourceShaded = "META-INF/services/borg.foo.something.another";
 
         ServicesResourceTransformer xformer = new ServicesResourceTransformer();
-        xformer.processResource( contentResource, contentStream, relocators );
+        xformer.processResource( contentResource, contentStream, relocators, 0 );
         contentStream.close();
 
         File tempJar = File.createTempFile("shade.", ".jar");
         tempJar.deleteOnExit();
         FileOutputStream fos = new FileOutputStream( tempJar );
-        JarOutputStream jos = new JarOutputStream( fos );
-        try {
+        try ( JarOutputStream jos = new JarOutputStream( fos ) ) {
             xformer.modifyOutputStream( jos );
             jos.close();
-            jos = null;
+            
             JarFile jarFile = new JarFile( tempJar );
             JarEntry jarEntry = jarFile.getJarEntry( contentResourceShaded );
             assertNotNull( jarEntry );
-            InputStream entryStream = jarFile.getInputStream( jarEntry );
-            try {
+            try ( InputStream entryStream = jarFile.getInputStream( jarEntry ) ) {
                 String xformedContent = IOUtils.toString( entryStream, "utf-8" );
-                assertEquals( "borg.foo.Service" + System.getProperty( "line.separator" )
-                    + "org.foo.exclude.OtherService" + System.getProperty( "line.separator" ), xformedContent );
+                assertEquals( "borg.foo.Service" + NEWLINE
+                    + "org.foo.exclude.OtherService" + NEWLINE, xformedContent );
             } finally {
-                IOUtils.closeQuietly( entryStream );
                 jarFile.close();
             }
         } finally {
-            if (jos != null)
-            {
-                IOUtils.closeQuietly( jos );
+            tempJar.delete();
+        }
+    }
+
+    @Test
+    public void mergeRelocatedFiles() throws Exception {
+        SimpleRelocator relocator =
+                new SimpleRelocator( "org.foo", "borg.foo", null, Collections.singletonList("org.foo.exclude.*"));
+        relocators.add( relocator );
+
+        String content = "org.foo.Service" + NEWLINE + "org.foo.exclude.OtherService" + NEWLINE;
+        String contentShaded = "borg.foo.Service" + NEWLINE + "org.foo.exclude.OtherService" + NEWLINE;
+        byte[] contentBytes = content.getBytes( StandardCharsets.UTF_8 );
+        String contentResource = "META-INF/services/org.foo.something.another";
+        String contentResourceShaded = "META-INF/services/borg.foo.something.another";
+
+        ServicesResourceTransformer xformer = new ServicesResourceTransformer();
+
+        try (InputStream contentStream = new ByteArrayInputStream( contentBytes )) {
+            xformer.processResource(contentResource, contentStream, relocators, 0);
+        }
+
+        try (InputStream contentStream = new ByteArrayInputStream( contentBytes )) {
+            xformer.processResource(contentResourceShaded, contentStream, relocators, 0);
+        }
+
+        File tempJar = File.createTempFile("shade.", ".jar");
+        tempJar.deleteOnExit();
+        FileOutputStream fos = new FileOutputStream( tempJar );
+        try ( JarOutputStream jos = new JarOutputStream( fos ) ) {
+            xformer.modifyOutputStream( jos );
+            jos.close();
+
+            JarFile jarFile = new JarFile( tempJar );
+            JarEntry jarEntry = jarFile.getJarEntry( contentResourceShaded );
+            assertNotNull( jarEntry );
+            try ( InputStream entryStream = jarFile.getInputStream( jarEntry ) ) {
+                String xformedContent = IOUtils.toString( entryStream, StandardCharsets.UTF_8);
+                assertEquals( contentShaded, xformedContent );
+            } finally {
+                jarFile.close();
             }
+        } finally {
+            tempJar.delete();
+        }
+    }
+    
+    @Test
+    public void concatanationAppliedMultipleTimes() throws Exception {
+        SimpleRelocator relocator =
+            new SimpleRelocator( "org.eclipse", "org.eclipse1234", null, null );
+        relocators.add( relocator );
+        
+        String content = "org.eclipse.osgi.launch.EquinoxFactory\n";
+        byte[] contentBytes = content.getBytes( "UTF-8" );
+        InputStream contentStream = new ByteArrayInputStream( contentBytes );
+        String contentResource = "META-INF/services/org.osgi.framework.launch.FrameworkFactory";
+
+        ServicesResourceTransformer xformer = new ServicesResourceTransformer();
+        xformer.processResource( contentResource, contentStream, relocators, 0 );
+        contentStream.close();
+
+        File tempJar = File.createTempFile("shade.", ".jar");
+        tempJar.deleteOnExit();
+        FileOutputStream fos = new FileOutputStream( tempJar );
+        try ( JarOutputStream jos = new JarOutputStream( fos ) ) {
+            xformer.modifyOutputStream( jos );
+            jos.close();
+            
+            JarFile jarFile = new JarFile( tempJar );
+            JarEntry jarEntry = jarFile.getJarEntry( contentResource );
+            assertNotNull( jarEntry );
+            try ( InputStream entryStream = jarFile.getInputStream( jarEntry ) ) {
+                String xformedContent = IOUtils.toString(entryStream, StandardCharsets.UTF_8);
+                assertEquals( "org.eclipse1234.osgi.launch.EquinoxFactory" + NEWLINE, xformedContent );
+            } finally {
+                jarFile.close();
+            }
+        } finally {
             tempJar.delete();
         }
     }
@@ -93,38 +169,36 @@ public class ServiceResourceTransformerTest {
     @Test
     public void concatenation() throws Exception {
         SimpleRelocator relocator = new SimpleRelocator("org.foo", "borg.foo", null, null);
-        List<Relocator> relocators = Lists.<Relocator>newArrayList( relocator );
-
+        relocators.add( relocator );
+        
         String content = "org.foo.Service\n";
-        byte[] contentBytes = content.getBytes( "UTF-8" );
+        byte[] contentBytes = content.getBytes( StandardCharsets.UTF_8 );
         InputStream contentStream = new ByteArrayInputStream( contentBytes );
         String contentResource = "META-INF/services/org.something.another";
 
         ServicesResourceTransformer xformer = new ServicesResourceTransformer();
-        xformer.processResource( contentResource, contentStream, relocators );
+        xformer.processResource( contentResource, contentStream, relocators, 0 );
         contentStream.close();
 
         content = "org.blah.Service\n";
-        contentBytes = content.getBytes( "UTF-8" );
+        contentBytes = content.getBytes( StandardCharsets.UTF_8 );
         contentStream = new ByteArrayInputStream( contentBytes );
         contentResource = "META-INF/services/org.something.another";
 
-        xformer.processResource( contentResource, contentStream, relocators );
+        xformer.processResource( contentResource, contentStream, relocators, 0 );
         contentStream.close();
 
         File tempJar = File.createTempFile("shade.", ".jar");
         tempJar.deleteOnExit();
         FileOutputStream fos = new FileOutputStream( tempJar );
-        JarOutputStream jos = new JarOutputStream( fos );
-        try {
+        try ( JarOutputStream jos = new JarOutputStream( fos ) ) {
             xformer.modifyOutputStream( jos );
             jos.close();
-            jos = null;
+
             JarFile jarFile = new JarFile( tempJar );
             JarEntry jarEntry = jarFile.getJarEntry( contentResource );
             assertNotNull( jarEntry );
-            InputStream entryStream = jarFile.getInputStream( jarEntry );
-            try {
+            try ( InputStream entryStream = jarFile.getInputStream( jarEntry ) ) {
                 String xformedContent = IOUtils.toString(entryStream, "utf-8");
                 // must be two lines, with our two classes.
                 String[] classes = xformedContent.split("\r?\n");
@@ -143,14 +217,9 @@ public class ServiceResourceTransformerTest {
                 }
                 assertTrue( h1 && h2 );
             } finally {
-                IOUtils.closeQuietly( entryStream );
                 jarFile.close();
             }
         } finally {
-            if (jos != null)
-            {
-                IOUtils.closeQuietly( jos );
-            }
             tempJar.delete();
         }
     }

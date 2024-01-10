@@ -34,6 +34,23 @@ import java.util.regex.Pattern;
 public class SimpleRelocator
     implements Relocator
 {
+    /**
+     * Match dot, slash or space at end of string
+     */
+    private static final Pattern RX_ENDS_WITH_DOT_SLASH_SPACE = Pattern.compile( "[./ ]$" );
+
+    /**
+     * Match <ul>
+     *     <li>certain Java keywords + space</li>
+     *     <li>beginning of Javadoc link + optional line breaks and continuations with '*'</li>
+     * </ul>
+     * at end of string
+     */
+    private static final Pattern RX_ENDS_WITH_JAVA_KEYWORD = Pattern.compile(
+        "\\b(import|package|public|protected|private|static|final|synchronized|abstract|volatile) $"
+            + "|"
+            + "\\{@link( \\*)* $"
+    );
 
     private final String pattern;
 
@@ -46,6 +63,10 @@ public class SimpleRelocator
     private final Set<String> includes;
 
     private final Set<String> excludes;
+
+    private final Set<String> sourcePackageExcludes = new LinkedHashSet<>();
+
+    private final Set<String> sourcePathExcludes = new LinkedHashSet<>();
 
     private final boolean rawString;
 
@@ -100,10 +121,28 @@ public class SimpleRelocator
         {
             this.includes.addAll( includes );
         }
-        
+
         if ( excludes != null && !excludes.isEmpty() )
         {
             this.excludes.addAll( excludes );
+        }
+
+        if ( !rawString && this.excludes != null )
+        {
+            // Create exclude pattern sets for sources
+            for ( String exclude : this.excludes )
+            {
+                // Excludes should be subpackages of the global pattern
+                if ( exclude.startsWith( pattern ) )
+                {
+                    sourcePackageExcludes.add( exclude.substring( pattern.length() ).replaceFirst( "[.][*]$", "" ) );
+                }
+                // Excludes should be subpackages of the global pattern
+                if ( exclude.startsWith( pathPattern ) )
+                {
+                    sourcePathExcludes.add( exclude.substring( pathPattern.length() ).replaceFirst( "[/][*]$", "" ) );
+                }
+            }
         }
     }
 
@@ -113,16 +152,14 @@ public class SimpleRelocator
 
         if ( patterns != null && !patterns.isEmpty() )
         {
-            normalized = new LinkedHashSet<String>();
-
+            normalized = new LinkedHashSet<>();
             for ( String pattern : patterns )
             {
-
                 String classPattern = pattern.replace( '.', '/' );
-
                 normalized.add( classPattern );
-
-                if ( classPattern.endsWith( "/*" ) )
+                // Actually, class patterns should just use 'foo.bar.*' ending with a single asterisk, but some users
+                // mistake them for path patterns like 'my/path/**', so let us be a bit more lenient here.
+                if ( classPattern.endsWith( "/*" ) || classPattern.endsWith( "/**" ) )
                 {
                     String packagePattern = classPattern.substring( 0, classPattern.lastIndexOf( '/' ) );
                     normalized.add( packagePattern );
@@ -205,7 +242,7 @@ public class SimpleRelocator
 
     public String relocateClass( String clazz )
     {
-        return clazz.replaceFirst( pattern, shadedPattern );
+        return rawString ? clazz : clazz.replaceFirst( pattern, shadedPattern );
     }
 
     public String applyToSourceContent( String sourceContent )
@@ -214,9 +251,45 @@ public class SimpleRelocator
         {
             return sourceContent;
         }
-        else
+        sourceContent = shadeSourceWithExcludes( sourceContent, pattern, shadedPattern, sourcePackageExcludes );
+        return shadeSourceWithExcludes( sourceContent, pathPattern, shadedPathPattern, sourcePathExcludes );
+    }
+
+    private String shadeSourceWithExcludes( String sourceContent, String patternFrom, String patternTo,
+                                            Set<String> excludedPatterns )
+    {
+        // Usually shading makes package names a bit longer, so make buffer 10% bigger than original source
+        StringBuilder shadedSourceContent = new StringBuilder( sourceContent.length() * 11 / 10 );
+        boolean isFirstSnippet = true;
+        // Make sure that search pattern starts at word boundary and we look for literal ".", not regex jokers
+        String[] snippets = sourceContent.split( "\\b" + patternFrom.replace( ".", "[.]" ) + "\\b" );
+        for ( int i = 0, snippetsLength = snippets.length; i < snippetsLength; i++ )
         {
-            return sourceContent.replaceAll( "\\b" + pattern, shadedPattern );
+            String snippet = snippets[i];
+            String previousSnippet = isFirstSnippet ? "" : snippets[i - 1];
+            boolean doExclude = false;
+            for ( String excludedPattern : excludedPatterns )
+            {
+                if ( snippet.startsWith( excludedPattern ) )
+                {
+                    doExclude = true;
+                    break;
+                }
+            }
+            if ( isFirstSnippet )
+            {
+                shadedSourceContent.append( snippet );
+                isFirstSnippet = false;
+            }
+            else
+            {
+                String previousSnippetOneLine = previousSnippet.replaceAll( "\\s+", " " );
+                boolean afterDotSlashSpace = RX_ENDS_WITH_DOT_SLASH_SPACE.matcher( previousSnippetOneLine ).find();
+                boolean afterJavaKeyWord = RX_ENDS_WITH_JAVA_KEYWORD.matcher( previousSnippetOneLine ).find();
+                boolean shouldExclude = doExclude || afterDotSlashSpace && !afterJavaKeyWord;
+                shadedSourceContent.append( shouldExclude ? patternFrom : patternTo ).append( snippet );
+            }
         }
+        return shadedSourceContent.toString();
     }
 }

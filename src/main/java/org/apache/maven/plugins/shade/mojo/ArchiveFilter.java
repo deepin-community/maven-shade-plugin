@@ -32,6 +32,8 @@ public class ArchiveFilter
 
     private Set<String> excludes;
 
+    private boolean excludeDefaults = true;
+
     public String getArtifact()
     {
         return artifact;
@@ -45,5 +47,10 @@ public class ArchiveFilter
     public Set<String> getExcludes()
     {
         return excludes;
+    }
+
+    public boolean getExcludeDefaults()
+    {
+        return excludeDefaults;
     }
 }

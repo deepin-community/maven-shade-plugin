@@ -17,8 +17,8 @@
 #   junit junit jar s/3\\..*/3.x/
 
 junit junit jar s/4\..*/4.x/ * *
-org.codehaus.plexus plexus-component-annotations * s/.*/1.5.5/ * *
-org.codehaus.plexus plexus-component-metadata maven-plugin s/1.7.1/1.5.5/ * *
 org.mockito s/mockito-all/mockito-core/ * s/.*/debian/ * *
 org.apache.maven maven-* * s/.*/3.x/ * *
+org.apache.maven.plugins maven-plugins pom s/.*/debian/ * *
 org.codehaus.plexus plexus-utils * s/.*/2.x/ * *
+s/org.xmlunit/xmlunit/ s/xmlunit-legacy/xmlunit/ * s/.*/debian/ * *

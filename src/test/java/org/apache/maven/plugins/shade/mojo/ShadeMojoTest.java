@@ -18,6 +18,9 @@ package org.apache.maven.plugins.shade.mojo;
  * specific language governing permissions and limitations
  * under the License.
  */
+
+import static java.util.Arrays.asList;
+import static java.util.Collections.singletonList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -43,13 +46,15 @@ import org.apache.maven.plugins.shade.filter.Filter;
 import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.apache.maven.plugins.shade.relocation.SimpleRelocator;
 import org.apache.maven.plugins.shade.resource.ComponentsXmlResourceTransformer;
+import org.apache.maven.plugins.shade.resource.ManifestResourceTransformer;
 import org.apache.maven.plugins.shade.resource.ResourceTransformer;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.ProjectBuildingRequest;
-import org.apache.maven.shared.artifact.ArtifactCoordinate;
-import org.apache.maven.shared.artifact.resolve.ArtifactResolver;
-import org.apache.maven.shared.artifact.resolve.ArtifactResolverException;
-import org.apache.maven.shared.artifact.resolve.ArtifactResult;
+import org.apache.maven.shared.transfer.artifact.ArtifactCoordinate;
+import org.apache.maven.shared.transfer.artifact.resolve.ArtifactResolver;
+import org.apache.maven.shared.transfer.artifact.resolve.ArtifactResult;
+import org.codehaus.plexus.ContainerConfiguration;
+import org.codehaus.plexus.PlexusConstants;
 import org.codehaus.plexus.PlexusTestCase;
 
 /**
@@ -59,6 +64,58 @@ import org.codehaus.plexus.PlexusTestCase;
 public class ShadeMojoTest
     extends PlexusTestCase
 {
+    @Override
+    protected void customizeContainerConfiguration(final ContainerConfiguration configuration) {
+        configuration.setClassPathScanning(PlexusConstants.SCANNING_INDEX);
+    }
+
+    public void testManifestTransformerSelection() throws Exception
+    {
+        final ShadeMojo mojo = new ShadeMojo();
+        final Method m = ShadeMojo.class.getDeclaredMethod("toResourceTransformers", String.class, List.class);
+        m.setAccessible(true);
+
+        final ManifestResourceTransformer defaultTfr = new ManifestResourceTransformer()
+        {
+            @Override
+            public String toString() // when test fails junit does a toString so easier to read errors this way
+            {
+                return "default";
+            }
+        };
+        final ManifestResourceTransformer testsTfr1 = new ManifestResourceTransformer()
+        {
+            @Override
+            public String toString()
+            {
+                return "t1";
+            }
+        };
+        testsTfr1.setForShade("tests");
+        final ManifestResourceTransformer testsTfr2 = new ManifestResourceTransformer()
+        {
+            @Override
+            public String toString()
+            {
+                return "t2";
+            }
+        };
+        testsTfr2.setForShade("tests");
+
+        assertEquals(
+                singletonList( defaultTfr ),
+                m.invoke( mojo, "jar", asList( defaultTfr, testsTfr1, testsTfr2 ) ));
+        assertEquals(
+                asList( testsTfr1, testsTfr2 ),
+                m.invoke( mojo, "tests", asList( defaultTfr, testsTfr1, testsTfr2 ) ));
+        assertEquals(
+                asList( testsTfr1, testsTfr2 ),
+                m.invoke( mojo, "tests", asList( testsTfr1, defaultTfr, testsTfr2 ) ));
+        assertEquals(
+                asList( testsTfr1, testsTfr2 ),
+                m.invoke( mojo, "tests", asList( testsTfr1, testsTfr2, defaultTfr ) ));
+    }
+
     public void testShaderWithDefaultShadedPattern()
         throws Exception
     {
@@ -76,18 +133,18 @@ public class ShadeMojoTest
     {
         File jarFile = new File( getBasedir(), "target/unit/foo-bar.jar" );
 
-        Shader s = (Shader) lookup( Shader.ROLE, "default" );
+        Shader s = lookup( Shader.class );
 
-        Set<File> set = new LinkedHashSet<File>();
+        Set<File> set = new LinkedHashSet<>();
         set.add( new File( getBasedir(), "src/test/jars/test-artifact-1.0-SNAPSHOT.jar" ) );
 
-        List<Relocator> relocators = new ArrayList<Relocator>();
+        List<Relocator> relocators = new ArrayList<>();
         relocators.add( new SimpleRelocator( "org.codehaus.plexus.util", "hidden", null, Arrays.asList(
                 "org.codehaus.plexus.util.xml.Xpp3Dom", "org.codehaus.plexus.util.xml.pull.*") ) );
 
-        List<ResourceTransformer> resourceTransformers = new ArrayList<ResourceTransformer>();
+        List<ResourceTransformer> resourceTransformers = new ArrayList<>();
 
-        List<Filter> filters = new ArrayList<Filter>();
+        List<Filter> filters = new ArrayList<>();
 
         ShadeRequest shadeRequest = new ShadeRequest();
         shadeRequest.setJars( set );
@@ -98,14 +155,15 @@ public class ShadeMojoTest
 
         s.shade( shadeRequest );
 
-        ClassLoader cl = new URLClassLoader( new URL[]{ jarFile.toURI().toURL() } );
-        Class<?> c = cl.loadClass( "org.apache.maven.plugins.shade.Lib" );
-
-        Field field = c.getDeclaredField( "CLASS_REALM_PACKAGE_IMPORT" );
-        assertEquals( "org.codehaus.plexus.util.xml.pull", field.get( null ) );
-
-        Method method = c.getDeclaredMethod( "getClassRealmPackageImport", new Class[0] );
-        assertEquals( "org.codehaus.plexus.util.xml.pull", method.invoke( null, new Object[0] ) );
+        try ( URLClassLoader cl = new URLClassLoader( new URL[]{ jarFile.toURI().toURL() } ) ) {
+            Class<?> c = cl.loadClass( "org.apache.maven.plugins.shade.Lib" );
+    
+            Field field = c.getDeclaredField( "CLASS_REALM_PACKAGE_IMPORT" );
+            assertEquals( "org.codehaus.plexus.util.xml.pull", field.get( null ) );
+    
+            Method method = c.getDeclaredMethod( "getClassRealmPackageImport" );
+            assertEquals( "org.codehaus.plexus.util.xml.pull", method.invoke( null ) );
+        }
     }
 
     /**
@@ -128,7 +186,6 @@ public class ShadeMojoTest
         {
             @Override
             public ArtifactResult resolveArtifact( ProjectBuildingRequest req, final Artifact art )
-                throws ArtifactResolverException
             {
                 return new ArtifactResult()
                 {
@@ -147,7 +204,6 @@ public class ShadeMojoTest
 
             @Override
             public ArtifactResult resolveArtifact( ProjectBuildingRequest req, final ArtifactCoordinate coordinate )
-                throws ArtifactResolverException
             {
                 return new ArtifactResult()
                 {
@@ -175,7 +231,7 @@ public class ShadeMojoTest
 
         // create and configure MavenProject
         MavenProject project = new MavenProject();
-        ArtifactHandler artifactHandler = (ArtifactHandler) lookup( ArtifactHandler.ROLE );
+        ArtifactHandler artifactHandler = lookup( ArtifactHandler.class );
         Artifact artifact = new DefaultArtifact( "org.apache.myfaces.core", "myfaces-impl",
                                                  VersionRange.createFromVersion( "2.0.1-SNAPSHOT" ), "compile", "jar",
                                                  null, artifactHandler );
@@ -201,7 +257,7 @@ public class ShadeMojoTest
         sessionField.set( mojo, mock( MavenSession.class ) );
 
         // invoke getFilters()
-        Method getFilters = ShadeMojo.class.getDeclaredMethod( "getFilters", new Class[0] );
+        Method getFilters = ShadeMojo.class.getDeclaredMethod( "getFilters" );
         getFilters.setAccessible( true );
         List<Filter> filters = (List<Filter>) getFilters.invoke( mojo);
 
@@ -217,24 +273,24 @@ public class ShadeMojoTest
     public void shaderWithPattern( String shadedPattern, File jar )
         throws Exception
     {
-        Shader s = (Shader) lookup( Shader.ROLE );
+        Shader s = lookup( Shader.class );
 
-        Set<File> set = new LinkedHashSet<File>();
+        Set<File> set = new LinkedHashSet<>();
 
         set.add( new File( getBasedir(), "src/test/jars/test-project-1.0-SNAPSHOT.jar" ) );
 
         set.add( new File( getBasedir(), "src/test/jars/plexus-utils-1.4.1.jar" ) );
 
-        List<Relocator> relocators = new ArrayList<Relocator>();
+        List<Relocator> relocators = new ArrayList<>();
 
         relocators.add( new SimpleRelocator( "org/codehaus/plexus/util", shadedPattern, null, Arrays.asList(
                 "org/codehaus/plexus/util/xml/Xpp3Dom", "org/codehaus/plexus/util/xml/pull.*") ) );
 
-        List<ResourceTransformer> resourceTransformers = new ArrayList<ResourceTransformer>();
+        List<ResourceTransformer> resourceTransformers = new ArrayList<>();
 
         resourceTransformers.add( new ComponentsXmlResourceTransformer() );
 
-        List<Filter> filters = new ArrayList<Filter>();
+        List<Filter> filters = new ArrayList<>();
 
         ShadeRequest shadeRequest = new ShadeRequest();
         shadeRequest.setJars( set );

@@ -19,7 +19,6 @@ package org.apache.maven.plugins.shade.resource;
  * under the License.
  */
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -39,14 +38,18 @@ import org.codehaus.plexus.util.IOUtil;
  * @author Robert Scholte
  * @since 3.0.0
  */
-public class ResourceBundleAppendingTransformer implements ResourceTransformer
+public class ResourceBundleAppendingTransformer
+    extends AbstractCompatibilityTransformer
 {
-    private Map<String, ByteArrayOutputStream>  dataMap = new HashMap<String, ByteArrayOutputStream>();
+    private Map<String, ByteArrayOutputStream>  dataMap = new HashMap<>();
     
     private Pattern resourceBundlePattern;
-    
+
+    private long time = Long.MIN_VALUE;
+
     /**
      * the base name of the resource bundle, a fully qualified class name
+     * @param basename The basename.
      */
     public void setBasename( String basename )
     {
@@ -55,15 +58,10 @@ public class ResourceBundleAppendingTransformer implements ResourceTransformer
 
     public boolean canTransformResource( String r )
     {
-        if ( resourceBundlePattern != null && resourceBundlePattern.matcher( r ).matches() )
-        {
-            return true;
-        }
-
-        return false;
+        return resourceBundlePattern != null && resourceBundlePattern.matcher( r ).matches();
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         ByteArrayOutputStream data = dataMap.get( resource );
@@ -75,6 +73,11 @@ public class ResourceBundleAppendingTransformer implements ResourceTransformer
         
         IOUtil.copy( is, data );
         data.write( '\n' );
+
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public boolean hasTransformedResource()
@@ -87,9 +90,11 @@ public class ResourceBundleAppendingTransformer implements ResourceTransformer
     {
         for ( Map.Entry<String, ByteArrayOutputStream> dataEntry : dataMap.entrySet() )
         {
-            jos.putNextEntry( new JarEntry( dataEntry.getKey() ) );
+            JarEntry jarEntry = new JarEntry( dataEntry.getKey() );
+            jarEntry.setTime( time );
+            jos.putNextEntry( jarEntry );
 
-            IOUtil.copy( new ByteArrayInputStream( dataEntry.getValue().toByteArray() ), jos );
+            jos.write( dataEntry.getValue().toByteArray() );
             dataEntry.getValue().reset();
         }
     }

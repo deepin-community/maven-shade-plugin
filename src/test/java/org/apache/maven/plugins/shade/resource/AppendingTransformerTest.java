@@ -21,16 +21,18 @@ package org.apache.maven.plugins.shade.resource;
 
 import java.util.Locale;
 
-import junit.framework.TestCase;
+import org.junit.Before;
+import org.junit.Test;
+
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test for {@link AppendingTransformer}.
  * 
  * @author Benjamin Bentmann
- * @version $Id$
  */
 public class AppendingTransformerTest
-    extends TestCase
 {
 
     private AppendingTransformer transformer;
@@ -44,18 +46,20 @@ public class AppendingTransformerTest
         Locale.setDefault( new Locale( "tr" ) );
     }
 
+    @Before
     public void setUp()
     {
-        this.transformer = new AppendingTransformer();
+        transformer = new AppendingTransformer();
     }
 
+    @Test
     public void testCanTransformResource()
     {
-        this.transformer.resource = "abcdefghijklmnopqrstuvwxyz";
+        transformer.resource = "abcdefghijklmnopqrstuvwxyz";
 
-        assertTrue( this.transformer.canTransformResource( "abcdefghijklmnopqrstuvwxyz" ) );
-        assertTrue( this.transformer.canTransformResource( "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ) );
-        assertFalse( this.transformer.canTransformResource( "META-INF/MANIFEST.MF" ) );
+        assertTrue( transformer.canTransformResource( "abcdefghijklmnopqrstuvwxyz" ) );
+        assertTrue( transformer.canTransformResource( "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ) );
+        assertFalse( transformer.canTransformResource( "META-INF/MANIFEST.MF" ) );
     }
 
 }

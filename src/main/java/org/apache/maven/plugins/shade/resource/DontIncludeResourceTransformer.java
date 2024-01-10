@@ -32,7 +32,7 @@ import java.util.jar.JarOutputStream;
  * resource into the shaded JAR.
  */
 public class DontIncludeResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
     String resource;
     
@@ -59,7 +59,7 @@ public class DontIncludeResourceTransformer
         return false;
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         // no op
