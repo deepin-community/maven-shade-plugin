@@ -25,13 +25,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.io.Writer;
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
 import org.apache.maven.plugins.shade.relocation.Relocator;
-import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.ReaderFactory;
 import org.codehaus.plexus.util.WriterFactory;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
@@ -45,9 +44,11 @@ import org.codehaus.plexus.util.xml.Xpp3DomWriter;
  * @since 3.0
  */
 public class PluginXmlResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
-    private List<Xpp3Dom> mojos = new LinkedList<Xpp3Dom>();
+    private List<Xpp3Dom> mojos = new ArrayList<>();
+
+    private long time = Long.MIN_VALUE;
 
     public static final String PLUGIN_XML_PATH = "META-INF/maven/plugin.xml";
 
@@ -56,7 +57,7 @@ public class PluginXmlResourceTransformer
         return PLUGIN_XML_PATH.equals( resource );
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         Xpp3Dom newDom;
@@ -78,13 +79,18 @@ public class PluginXmlResourceTransformer
         }
         catch ( Exception e )
         {
-            throw (IOException) new IOException( "Error parsing plugin.xml in " + is ).initCause( e );
+            throw new IOException( "Error parsing plugin.xml in " + is, e );
         }
 
         // Only try to merge in mojos if there are some elements in the plugin
         if ( newDom.getChild( "mojos" ) == null )
         {
             return;
+        }
+
+        if ( time > this.time )
+        {
+            this.time = time;        
         }
 
         for ( Xpp3Dom mojo : newDom.getChild( "mojos" ).getChildren( "mojo" ) )
@@ -135,9 +141,11 @@ public class PluginXmlResourceTransformer
     {
         byte[] data = getTransformedResource();
 
-        jos.putNextEntry( new JarEntry( PLUGIN_XML_PATH ) );
+        JarEntry jarEntry = new JarEntry( PLUGIN_XML_PATH );
+        jarEntry.setTime( time );
+        jos.putNextEntry( jarEntry );
 
-        IOUtil.copy( data, jos );
+        jos.write( data );
 
         mojos.clear();
     }
@@ -152,8 +160,7 @@ public class PluginXmlResourceTransformer
     {
         ByteArrayOutputStream baos = new ByteArrayOutputStream( 1024 * 4 );
 
-        Writer writer = WriterFactory.newXmlWriter( baos );
-        try
+        try ( Writer writer = WriterFactory.newXmlWriter( baos ) )
         {
             Xpp3Dom dom = new Xpp3Dom( "plugin" );
 
@@ -167,13 +174,6 @@ public class PluginXmlResourceTransformer
             }
 
             Xpp3DomWriter.write( writer, dom );
-
-            writer.close();
-            writer = null;
-        }
-        finally
-        {
-            IOUtil.close( writer );
         }
 
         return baos.toByteArray();

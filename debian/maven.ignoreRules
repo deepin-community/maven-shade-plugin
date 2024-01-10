@@ -16,3 +16,4 @@
 
 org.apache.maven.plugins maven-enforcer-plugin
 org.apache.rat apache-rat-plugin
+org.sonatype.sisu sisu-guice

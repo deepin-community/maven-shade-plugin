@@ -20,28 +20,32 @@ package org.apache.maven.plugins.shade.filter;
  */
 
 import org.apache.maven.artifact.Artifact;
+import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.plugin.logging.Log;
 import org.apache.maven.project.MavenProject;
-import org.codehaus.plexus.util.IOUtil;
 import org.vafer.jdependency.Clazz;
 import org.vafer.jdependency.Clazzpath;
 import org.vafer.jdependency.ClazzpathUnit;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.zip.ZipException;
 
 /**
  * A filter that prevents the inclusion of classes not required in the final jar.
- *
- * @author Torsten Curdt
  */
 public class MinijarFilter
     implements Filter
@@ -111,39 +115,137 @@ public class MinijarFilter
             removable.removeAll( artifactUnit.getTransitiveDependencies() );
             removeSpecificallyIncludedClasses( project,
                 simpleFilters == null ? Collections.<SimpleFilter>emptyList() : simpleFilters );
+            removeServices( project, cp );
         }
+    }
+
+    private void removeServices( final MavenProject project, final Clazzpath cp )
+    {
+        boolean repeatScan;
+        do
+        {
+            repeatScan = false;
+            final Set<Clazz> neededClasses = cp.getClazzes();
+            neededClasses.removeAll( removable );
+            try
+            {
+                // getRuntimeClasspathElements returns a list of
+                //  - the build output directory
+                //  - all the paths to the dependencies' jars
+                // We thereby need to ignore the build directory because we don't want
+                // to remove anything from it, as it's the starting point of the
+                // minification process.
+                for ( final String fileName : project.getRuntimeClasspathElements() )
+                {
+                    // Ignore the build directory from this project
+                    if ( fileName.equals( project.getBuild().getOutputDirectory() ) )
+                    {
+                        continue;
+                    }
+                    if ( removeServicesFromJar( cp, neededClasses, fileName ) )
+                    {
+                        repeatScan = true;
+                    }
+                }
+            }
+            catch ( final DependencyResolutionRequiredException e )
+            {
+                log.warn( e.getMessage() );
+            }
+        }
+        while ( repeatScan );
+    }
+
+    private boolean removeServicesFromJar( Clazzpath cp, Set<Clazz> neededClasses, String fileName )
+    {
+        boolean repeatScan = false;
+        try ( final JarFile jar = new JarFile( fileName ) )
+        {
+            for ( final Enumeration<JarEntry> entries = jar.entries(); entries.hasMoreElements(); )
+            {
+                final JarEntry jarEntry = entries.nextElement();
+                if ( jarEntry.isDirectory() || !jarEntry.getName().startsWith( "META-INF/services/" ) )
+                {
+                    continue;
+                }
+
+                final String serviceClassName = jarEntry.getName().substring( "META-INF/services/".length() );
+                final boolean isNeededClass = neededClasses.contains( cp.getClazz( serviceClassName ) );
+                if ( !isNeededClass )
+                {
+                    continue;
+                }
+
+                try ( final BufferedReader configFileReader = new BufferedReader(
+                        new InputStreamReader( jar.getInputStream( jarEntry ), UTF_8 ) ) )
+                {
+                    // check whether the found classes use services in turn
+                    repeatScan = scanServiceProviderConfigFile( cp, configFileReader );
+                }
+                catch ( final IOException e )
+                {
+                    log.warn( e.getMessage() );
+                }
+            }
+        }
+        catch ( final IOException e )
+        {
+            log.warn( "Not a JAR file candidate. Ignoring classpath element '" + fileName + "' (" + e + ")." );
+        }
+        return repeatScan;
+    }
+
+    private boolean scanServiceProviderConfigFile( Clazzpath cp, BufferedReader configFileReader ) throws IOException
+    {
+        boolean serviceClassFound = false;
+        for ( String line = configFileReader.readLine(); line != null; line = configFileReader.readLine() )
+        {
+            final String className = line.split( "#", 2 )[0].trim();
+            if ( className.isEmpty() )
+            {
+                continue;
+            }
+
+            final Clazz clazz = cp.getClazz( className );
+            if ( clazz == null || !removable.contains( clazz ) )
+            {
+                continue;
+            }
+
+            log.debug( className + " was not removed because it is a service" );
+            removeClass( clazz );
+            serviceClassFound = true;
+        }
+        return serviceClassFound;
+    }
+
+    private void removeClass( final Clazz clazz )
+    {
+        removable.remove( clazz );
+        removable.removeAll( clazz.getTransitiveDependencies() );
     }
 
     private ClazzpathUnit addDependencyToClasspath( Clazzpath cp, Artifact dependency )
         throws IOException
     {
-        InputStream is = null;
         ClazzpathUnit clazzpathUnit = null;
-        try
+        try ( InputStream is = new FileInputStream( dependency.getFile() ) )
         {
-            is = new FileInputStream( dependency.getFile() );
             clazzpathUnit = cp.addClazzpathUnit( is, dependency.toString() );
-            is.close();
-            is = null;
         }
         catch ( ZipException e )
         {
             log.warn( dependency.getFile()
                 + " could not be unpacked/read for minimization; dependency is probably malformed." );
             IOException ioe = new IOException( "Dependency " + dependency.toString() + " in file "
-                + dependency.getFile() + " could not be unpacked. File is probably corrupt" );
-            ioe.initCause( e );
+                + dependency.getFile() + " could not be unpacked. File is probably corrupt", e );
             throw ioe;
         }
-        catch ( ArrayIndexOutOfBoundsException e )
+        catch ( ArrayIndexOutOfBoundsException | IllegalArgumentException e )
         {
             // trap ArrayIndexOutOfBoundsExceptions caused by malformed dependency classes (MSHADE-107)
             log.warn( dependency.toString()
                 + " could not be analyzed for minimization; dependency is probably malformed." );
-        }
-        finally
-        {
-            IOUtil.close( is );
         }
 
         return clazzpathUnit;
@@ -151,17 +253,15 @@ public class MinijarFilter
 
     private void removePackages( ClazzpathUnit artifactUnit )
     {
-        Set<String> packageNames = new HashSet<String>();
+        Set<String> packageNames = new HashSet<>();
         removePackages( artifactUnit.getClazzes(), packageNames );
         removePackages( artifactUnit.getTransitiveDependencies(), packageNames );
     }
 
-    @SuppressWarnings( "rawtypes" )
-    private void removePackages( Set clazzes, Set<String> packageNames )
+    private void removePackages( Set<Clazz> clazzes, Set<String> packageNames )
     {
-        for ( Object clazze : clazzes )
+        for ( Clazz clazz : clazzes )
         {
-            Clazz clazz = (Clazz) clazze;
             String name = clazz.getName();
             while ( name.contains( "." ) )
             {
@@ -191,16 +291,13 @@ public class MinijarFilter
                     if ( depClazzpathUnit != null )
                     {
                         Set<Clazz> clazzes = depClazzpathUnit.getClazzes();
-                        Iterator<Clazz> j = removable.iterator();
-                        while ( j.hasNext() )
+                        for ( final Clazz clazz : new HashSet<>( removable ) )
                         {
-                            Clazz clazz = j.next();
-
                             if ( clazzes.contains( clazz ) //
                                 && simpleFilter.isSpecificallyIncluded( clazz.getName().replace( '.', '/' ) ) )
                             {
-                                log.info( clazz.getName() + " not removed because it was specifically included" );
-                                j.remove();
+                                log.debug( clazz.getName() + " not removed because it was specifically included" );
+                                removeClass( clazz );
                             }
                         }
                     }
@@ -209,13 +306,13 @@ public class MinijarFilter
         }
     }
 
-    /** {@inheritDoc} */
+    @Override
     public boolean canFilter( File jar )
     {
         return true;
     }
 
-    /** {@inheritDoc} */
+    @Override
     public boolean isFiltered( String classFile )
     {
         String className = classFile.replace( '/', '.' ).replaceFirst( "\\.class$", "" );
@@ -232,7 +329,7 @@ public class MinijarFilter
         return false;
     }
 
-    /** {@inheritDoc} */
+    @Override
     public void finished()
     {
         int classesTotal = classesRemoved + classesKept;

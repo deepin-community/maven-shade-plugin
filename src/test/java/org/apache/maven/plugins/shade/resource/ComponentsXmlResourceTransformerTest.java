@@ -19,13 +19,13 @@ package org.apache.maven.plugins.shade.resource;
  * under the License.
  */
 
-import junit.framework.TestCase;
-
 import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.codehaus.plexus.util.IOUtil;
 import org.custommonkey.xmlunit.Diff;
 import org.custommonkey.xmlunit.XMLAssert;
 import org.custommonkey.xmlunit.XMLUnit;
+import org.junit.Before;
+import org.junit.Test;
 
 import java.io.InputStream;
 import java.util.Collections;
@@ -37,15 +37,16 @@ import java.util.Collections;
  *
  */
 public class ComponentsXmlResourceTransformerTest
-    extends TestCase
 {
     private ComponentsXmlResourceTransformer transformer;
 
+    @Before
     public void setUp()
     {
         this.transformer = new ComponentsXmlResourceTransformer();
     }
 
+    @Test
     public void testConfigurationMerging()
         throws Exception
     {
@@ -54,11 +55,11 @@ public class ComponentsXmlResourceTransformerTest
 
         InputStream resourceAsStream = getClass().getResourceAsStream( "/components-1.xml" );
         transformer.processResource( "components-1.xml", resourceAsStream,
-                                     Collections.<Relocator> emptyList() );
+                                     Collections.<Relocator> emptyList(), 0 );
         resourceAsStream.close();
         InputStream resourceAsStream1 = getClass().getResourceAsStream( "/components-2.xml" );
         transformer.processResource( "components-1.xml", resourceAsStream1,
-                                     Collections.<Relocator> emptyList() );
+                                     Collections.<Relocator> emptyList(), 0 );
         resourceAsStream1.close();
         final InputStream resourceAsStream2 = getClass().getResourceAsStream( "/components-expected.xml" );
         Diff diff = XMLUnit.compareXML(

@@ -1,3 +1,32 @@
+maven-shade-plugin (3.4.1-2) unstable; urgency=medium
+
+  * Team upload.
+  * Depend on libmaven-parent-java to fix a build failure
+
+ -- Emmanuel Bourg <ebourg@apache.org>  Thu, 12 Jan 2023 11:21:42 +0100
+
+maven-shade-plugin (3.4.1-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+
+ -- Emmanuel Bourg <ebourg@apache.org>  Fri, 06 Jan 2023 13:55:04 +0100
+
+maven-shade-plugin (3.4.0-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+    - Removed the patch
+    - Depend on libeclipse-sisu-maven-plugin-java
+      instead of libplexus-component-metadata-java
+    - New dependency on libcommons-collections4-java
+    - Updated the Maven rules
+    - Set the language level to Java 8
+  * Standards-Version updated to 4.6.1
+  * Switch to debhelper level 13
+
+ -- Emmanuel Bourg <ebourg@apache.org>  Fri, 14 Oct 2022 10:38:59 +0200
+
 maven-shade-plugin (3.1.1-1) unstable; urgency=medium
 
   * Team upload.

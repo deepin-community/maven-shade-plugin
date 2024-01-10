@@ -35,44 +35,43 @@ import java.util.jar.JarOutputStream;
  * content into the shaded JAR.
  */
 public class IncludeResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
     File file;
 
     String resource;
+
+    private long time = Long.MIN_VALUE;
 
     public boolean canTransformResource( String r )
     {
         return false;
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
-        // no op
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public boolean hasTransformedResource()
     {
-        return file != null ? file.exists() : false;
+        return file != null && file.exists();
     }
 
     public void modifyOutputStream( JarOutputStream jos )
         throws IOException
     {
-        InputStream in = null;
-        try
-        {
-            jos.putNextEntry( new JarEntry( resource ) );
+        JarEntry jarEntry = new JarEntry( resource );
+        jarEntry.setTime( time );
 
-            in = new FileInputStream( file );
-            IOUtil.copy( in, jos );
-            in.close();
-            in = null;
-        }
-        finally
+        try ( InputStream in = new FileInputStream( file ) )
         {
-            IOUtil.close( in );
+            jos.putNextEntry( jarEntry );
+            IOUtil.copy( in, jos );
         }
     }
     

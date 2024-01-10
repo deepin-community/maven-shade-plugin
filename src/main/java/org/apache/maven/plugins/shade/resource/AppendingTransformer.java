@@ -22,7 +22,6 @@ package org.apache.maven.plugins.shade.resource;
 import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.codehaus.plexus.util.IOUtil;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,27 +33,28 @@ import java.util.jar.JarOutputStream;
  * A resource processor that appends content for a resource, separated by a newline.
  */
 public class AppendingTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
     String resource;
 
     ByteArrayOutputStream data = new ByteArrayOutputStream();
 
+    private long time = Long.MIN_VALUE;
+
     public boolean canTransformResource( String r )
     {
-        if ( resource != null && resource.equalsIgnoreCase( r ) )
-        {
-            return true;
-        }
-
-        return false;
+        return resource != null && resource.equalsIgnoreCase( r );
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         IOUtil.copy( is, data );
         data.write( '\n' );
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public boolean hasTransformedResource()
@@ -65,9 +65,11 @@ public class AppendingTransformer
     public void modifyOutputStream( JarOutputStream jos )
         throws IOException
     {
-        jos.putNextEntry( new JarEntry( resource ) );
+        JarEntry jarEntry = new JarEntry( resource );
+        jarEntry.setTime( time );
+        jos.putNextEntry( jarEntry );
 
-        IOUtil.copy( new ByteArrayInputStream( data.toByteArray() ), jos );
+        jos.write( data.toByteArray() );
         data.reset();
     }
 }

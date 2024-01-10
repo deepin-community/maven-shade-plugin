@@ -33,10 +33,11 @@ public interface ResourceTransformer
 
     /**
      * Transform an individual resource
-     * @param resource The resoure name
+     * @param resource The resource name
      * @param is An input stream for the resource, the implementation should *not* close this stream
      * @param relocators  A list of relocators
      * @throws IOException When the IO blows up
+     * @deprecated prefer ReproducibleResourceTransformer
      */
     void processResource( String resource, InputStream is, List<Relocator> relocators )
         throws IOException;

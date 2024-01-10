@@ -30,20 +30,22 @@ import org.apache.maven.plugins.shade.relocation.Relocator;
  * Prevents duplicate copies of the license
  */
 public class ApacheLicenseResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
-
     private static final String LICENSE_PATH = "META-INF/LICENSE";
 
     private static final String LICENSE_TXT_PATH = "META-INF/LICENSE.txt";
+    
+    private static final String LICENSE_MD_PATH = "META-INF/LICENSE.md";
 
     public boolean canTransformResource( String resource )
     {
         return LICENSE_PATH.equalsIgnoreCase( resource )
-            || LICENSE_TXT_PATH.regionMatches( true, 0, resource, 0, LICENSE_TXT_PATH.length() );
+            || LICENSE_TXT_PATH.regionMatches( true, 0, resource, 0, LICENSE_TXT_PATH.length() )
+            || LICENSE_MD_PATH.regionMatches( true, 0, resource, 0, LICENSE_MD_PATH.length() );
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         // no op

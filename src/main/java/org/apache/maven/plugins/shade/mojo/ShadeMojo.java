@@ -19,23 +19,6 @@ package org.apache.maven.plugins.shade.mojo;
  * under the License.
  */
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.Writer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.repository.ArtifactRepository;
 import org.apache.maven.execution.MavenSession;
@@ -57,6 +40,7 @@ import org.apache.maven.plugins.shade.filter.SimpleFilter;
 import org.apache.maven.plugins.shade.pom.PomWriter;
 import org.apache.maven.plugins.shade.relocation.Relocator;
 import org.apache.maven.plugins.shade.relocation.SimpleRelocator;
+import org.apache.maven.plugins.shade.resource.ManifestResourceTransformer;
 import org.apache.maven.plugins.shade.resource.ResourceTransformer;
 import org.apache.maven.project.DefaultProjectBuildingRequest;
 import org.apache.maven.project.MavenProject;
@@ -65,20 +49,34 @@ import org.apache.maven.project.ProjectBuilder;
 import org.apache.maven.project.ProjectBuildingException;
 import org.apache.maven.project.ProjectBuildingRequest;
 import org.apache.maven.project.ProjectBuildingResult;
-import org.apache.maven.shared.artifact.DefaultArtifactCoordinate;
-import org.apache.maven.shared.artifact.resolve.ArtifactResolver;
-import org.apache.maven.shared.artifact.resolve.ArtifactResolverException;
 import org.apache.maven.shared.dependency.graph.DependencyGraphBuilder;
 import org.apache.maven.shared.dependency.graph.DependencyGraphBuilderException;
 import org.apache.maven.shared.dependency.graph.DependencyNode;
-import org.codehaus.plexus.PlexusConstants;
-import org.codehaus.plexus.PlexusContainer;
-import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
-import org.codehaus.plexus.context.Context;
-import org.codehaus.plexus.context.ContextException;
-import org.codehaus.plexus.personality.plexus.lifecycle.phase.Contextualizable;
+import org.apache.maven.shared.transfer.artifact.DefaultArtifactCoordinate;
+import org.apache.maven.shared.transfer.artifact.resolve.ArtifactResolver;
+import org.apache.maven.shared.transfer.artifact.resolve.ArtifactResolverException;
 import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.WriterFactory;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.Writer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import javax.inject.Inject;
+import static org.apache.maven.plugins.shade.resource.UseDependencyReducedPom.createPomReplaceTransformers;
 
 /**
  * Mojo that performs shading delegating to the Shader component.
@@ -93,7 +91,6 @@ import org.codehaus.plexus.util.WriterFactory;
 // CHECKSTYLE_ON: LineLength
 public class ShadeMojo
     extends AbstractMojo
-    implements Contextualizable
 {
     /**
      * The current Maven session.
@@ -290,6 +287,15 @@ public class ShadeMojo
     private boolean generateUniqueDependencyReducedPom;
 
     /**
+     * Add dependency reduced POM to the JAR instead of the original one provided by the project.
+     * If {@code createDependencyReducedPom} is {@code false} this parameter will be ignored.
+     *
+     * @since 3.3.0
+     */
+    @Parameter( defaultValue = "false" )
+    private boolean useDependencyReducedPomInJar;
+
+    /**
      * When true, dependencies are kept in the pom but with scope 'provided'; when false, the dependency is removed.
      */
     @Parameter
@@ -315,9 +321,25 @@ public class ShadeMojo
     private boolean createSourcesJar;
 
     /**
-     * When true, it will attempt to shade the contents of the java source files when creating the sources jar. When
-     * false, it will just relocate the java source files to the shaded paths, but will not modify the actual contents
-     * of the java source files.
+     * When true, it will attempt to create a test sources jar.
+     */
+    @Parameter
+    private boolean createTestSourcesJar;
+
+    /**
+     * When true, it will attempt to shade the contents of Java source files when creating the sources JAR. When false,
+     * it will just relocate the Java source files to the shaded paths, but will not modify the actual source file
+     * contents.
+     * <p>
+     * <b>Please note:</b> This feature uses a heuristic search & replace approach which covers many, but definitely not
+     * all possible cases of source code shading and its excludes. There is no full Java parser behind this
+     * functionality, which would be the only way to get this right for Java language elements. As for matching within
+     * Java string constants, this is next to impossible to get 100% right, trying to guess if they are used in
+     * reflection or not.
+     * <p>
+     * Please understand that the source shading feature is not meant as a source code generator anyway, merely as a
+     * tool creating reasonably plausible source code when navigating to a relocated library class from an IDE,
+     * hopefully displaying source code which makes 95% sense - no more, no less.
      */
     @Parameter( property = "shadeSourcesContent", defaultValue = "false" )
     private boolean shadeSourcesContent;
@@ -361,33 +383,44 @@ public class ShadeMojo
     @Parameter( defaultValue = "false" )
     private boolean useBaseVersion;
 
+    /**
+     * When true, creates a shaded test-jar artifact as well.
+     */
     @Parameter( defaultValue = "false" )
     private boolean shadeTestJar;
 
     /**
-     * @since 1.6
+     * All the present Shaders.
      */
-    private PlexusContainer plexusContainer;
-
-    public void contextualize( Context context )
-        throws ContextException
-    {
-        plexusContainer = (PlexusContainer) context.get( PlexusConstants.PLEXUS_KEY );
-    }
+    @Inject
+    private Map<String, Shader> shaders;
 
     /**
-     * @throws MojoExecutionException
+     * When true, skips the execution of this MOJO.
+     * @since 3.3.0
+     */
+    @Parameter( defaultValue = "false" )
+    private boolean skip;
+    
+    /**
+     * @throws MojoExecutionException in case of an error.
      */
     public void execute()
         throws MojoExecutionException
     {
+        if ( skip )
+        {
+            getLog().info( "Shading has been skipped." );
+            return;
+        }
 
         setupHintedShader();
 
-        Set<File> artifacts = new LinkedHashSet<File>();
-        Set<String> artifactIds = new LinkedHashSet<String>();
-        Set<File> sourceArtifacts = new LinkedHashSet<File>();
-        Set<File> testArtifacts = new LinkedHashSet<File>();
+        Set<File> artifacts = new LinkedHashSet<>();
+        Set<String> artifactIds = new LinkedHashSet<>();
+        Set<File> sourceArtifacts = new LinkedHashSet<>();
+        Set<File> testArtifacts = new LinkedHashSet<>();
+        Set<File> testSourceArtifacts = new LinkedHashSet<>();
 
         ArtifactSelector artifactSelector =
             new ArtifactSelector( project.getArtifact(), artifactSet, shadedGroupFilter );
@@ -420,13 +453,24 @@ public class ShadeMojo
                     testArtifacts.add( file );
                 }
             }
+
+            if ( createTestSourcesJar )
+            {
+                File file = shadedTestSourcesArtifactFile();
+                if ( file.isFile() )
+                {
+                    testSourceArtifacts.add( file );
+                }
+            }
         }
 
-        processArtifactSelectors( artifacts, artifactIds, sourceArtifacts, artifactSelector );
+        processArtifactSelectors( artifacts, artifactIds, sourceArtifacts, testArtifacts, testSourceArtifacts,
+            artifactSelector );
 
         File outputJar = ( outputFile != null ) ? outputFile : shadedArtifactFileWithClassifier();
         File sourcesJar = shadedSourceArtifactFileWithClassifier();
         File testJar = shadedTestArtifactFileWithClassifier();
+        File testSourcesJar = shadedTestSourceArtifactFileWithClassifier();
 
         // Now add our extra resources
         try
@@ -437,25 +481,48 @@ public class ShadeMojo
 
             List<ResourceTransformer> resourceTransformers = getResourceTransformers();
 
-            ShadeRequest shadeRequest = shadeRequest( artifacts, outputJar, filters, relocators, resourceTransformers );
+            if ( createDependencyReducedPom )
+            {
+                createDependencyReducedPom( artifactIds );
+
+                if ( useDependencyReducedPomInJar )
+                {
+                    // In some cases the used implementation of the resourceTransformers is immutable.
+                    resourceTransformers = new ArrayList<>( resourceTransformers );
+                    resourceTransformers.addAll(
+                            createPomReplaceTransformers( project, dependencyReducedPomLocation ) );
+                }
+            }
+
+            ShadeRequest shadeRequest = shadeRequest( "jar", artifacts, outputJar, filters, relocators,
+                    resourceTransformers );
 
             shader.shade( shadeRequest );
 
             if ( createSourcesJar )
             {
                 ShadeRequest shadeSourcesRequest =
-                    createShadeSourcesRequest( sourceArtifacts, sourcesJar, filters, relocators, resourceTransformers );
+                    createShadeSourcesRequest( "sources-jar", sourceArtifacts, sourcesJar, filters, relocators,
+                            resourceTransformers );
 
                 shader.shade( shadeSourcesRequest );
             }
 
             if ( shadeTestJar )
             {
+                ShadeRequest shadeTestRequest =
+                    shadeRequest( "test-jar", testArtifacts, testJar, filters, relocators, resourceTransformers );
 
-                ShadeRequest shadeSourcesRequest =
-                    createShadeSourcesRequest( testArtifacts, testJar, filters, relocators, resourceTransformers );
+                shader.shade( shadeTestRequest );
+            }
 
-                shader.shade( shadeSourcesRequest );
+            if ( createTestSourcesJar )
+            {
+                ShadeRequest shadeTestSourcesRequest =
+                    createShadeSourcesRequest( "test-sources-jar", testSourceArtifacts, testSourcesJar, filters,
+                        relocators, resourceTransformers );
+
+                shader.shade( shadeTestSourcesRequest );
             }
 
             if ( outputFile == null )
@@ -490,7 +557,15 @@ public class ShadeMojo
                         replaceFile( finalFile, testJar );
                         testJar = finalFile;
                     }
-                    
+
+                    if ( createTestSourcesJar )
+                    {
+                        finalFileName = finalName + "-test-sources.jar";
+                        finalFile = new File( outputDirectory, finalFileName );
+                        replaceFile( finalFile, testSourcesJar );
+                        testSourcesJar = finalFile;
+                    }
+                
                     renamed = true;
                 }
 
@@ -503,6 +578,18 @@ public class ShadeMojo
                     {
                         projectHelper.attachArtifact( project, "java-source", shadedClassifierName + "-sources",
                                                       sourcesJar );
+                    }
+
+                    if ( shadeTestJar )
+                    {
+                        projectHelper.attachArtifact( project, "test-jar", shadedClassifierName + "-tests",
+                                                      testJar );
+                    }
+
+                    if ( createTestSourcesJar )
+                    {
+                        projectHelper.attachArtifact( project, "java-source",
+                                shadedClassifierName + "-test-sources", testSourcesJar );
                     }
                 }
                 else if ( !renamed )
@@ -530,12 +617,19 @@ public class ShadeMojo
 
                             replaceFile( shadedTests, testJar );
 
-                            projectHelper.attachArtifact( project, "jar", "tests", shadedTests );
+                            projectHelper.attachArtifact( project, "test-jar", shadedTests );
                         }
 
-                        if ( createDependencyReducedPom )
+                        if ( createTestSourcesJar )
                         {
-                            createDependencyReducedPom( artifactIds );
+                            getLog().info( "Replacing original test source artifact "
+                                + "with shaded test source artifact." );
+                            File shadedTestSources = shadedTestSourcesArtifactFile();
+
+                            replaceFile( shadedTestSources, testSourcesJar );
+
+                            projectHelper.attachArtifact( project, "java-source", "test-sources",
+                                shadedTestSources );
                         }
                     }
                 }
@@ -560,7 +654,7 @@ public class ShadeMojo
         getLog().error( "- You removed the configuration of the maven-jar-plugin that produces the main artifact." );
     }
 
-    private ShadeRequest shadeRequest( Set<File> artifacts, File outputJar, List<Filter> filters,
+    private ShadeRequest shadeRequest( String shade, Set<File> artifacts, File outputJar, List<Filter> filters,
                                        List<Relocator> relocators, List<ResourceTransformer> resourceTransformers )
     {
         ShadeRequest shadeRequest = new ShadeRequest();
@@ -568,16 +662,16 @@ public class ShadeMojo
         shadeRequest.setUberJar( outputJar );
         shadeRequest.setFilters( filters );
         shadeRequest.setRelocators( relocators );
-        shadeRequest.setResourceTransformers( resourceTransformers );
+        shadeRequest.setResourceTransformers( toResourceTransformers( shade, resourceTransformers ) );
         return shadeRequest;
     }
 
-    private ShadeRequest createShadeSourcesRequest( Set<File> testArtifacts, File testJar, List<Filter> filters,
-                                                    List<Relocator> relocators,
+    private ShadeRequest createShadeSourcesRequest( String shade, Set<File> testArtifacts, File testJar,
+                                                    List<Filter> filters, List<Relocator> relocators,
                                                     List<ResourceTransformer> resourceTransformers )
     {
         ShadeRequest shadeSourcesRequest =
-            shadeRequest( testArtifacts, testJar, filters, relocators, resourceTransformers );
+            shadeRequest( shade, testArtifacts, testJar, filters, relocators, resourceTransformers );
         shadeSourcesRequest.setShadeSourcesContent( shadeSourcesContent );
         return shadeSourcesRequest;
     }
@@ -587,33 +681,40 @@ public class ShadeMojo
     {
         if ( shaderHint != null )
         {
-            try
+            shader = shaders.get( shaderHint );
+
+            if ( shader == null )
             {
-                shader = (Shader) plexusContainer.lookup( Shader.ROLE, shaderHint );
-            }
-            catch ( ComponentLookupException e )
-            {
-                throw new MojoExecutionException( "unable to lookup own Shader implementation with hint:'" + shaderHint
-                    + "'", e );
+                throw new MojoExecutionException(
+                    "unable to lookup own Shader implementation with hint: '" + shaderHint + "'"
+                );
             }
         }
     }
 
     private void processArtifactSelectors( Set<File> artifacts, Set<String> artifactIds, Set<File> sourceArtifacts,
+                                           Set<File> testArtifacts, Set<File> testSourceArtifacts,
                                            ArtifactSelector artifactSelector )
     {
+
+        List<String> excludedArtifacts = new ArrayList<>();
+        List<String> pomArtifacts = new ArrayList<>();
+        List<String> emptySourceArtifacts = new ArrayList<>();
+        List<String> emptyTestArtifacts = new ArrayList<>();
+        List<String> emptyTestSourceArtifacts = new ArrayList<>();
+
         for ( Artifact artifact : project.getArtifacts() )
         {
             if ( !artifactSelector.isSelected( artifact ) )
             {
-                getLog().info( "Excluding " + artifact.getId() + " from the shaded jar." );
+                excludedArtifacts.add( artifact.getId() );
 
                 continue;
             }
 
             if ( "pom".equals( artifact.getType() ) )
             {
-                getLog().info( "Skipping pom dependency " + artifact.getId() + " in the shaded jar." );
+                pomArtifacts.add( artifact.getId() );
                 continue;
             }
 
@@ -624,7 +725,7 @@ public class ShadeMojo
 
             if ( createSourcesJar )
             {
-                File file = resolveArtifactSources( artifact );
+                File file = resolveArtifactForClassifier( artifact, "sources" );
                 if ( file != null )
                 {
                     if ( file.length() > 0 )
@@ -633,10 +734,60 @@ public class ShadeMojo
                     }
                     else
                     {
-                        getLog().warn( "Skipping empty source jar " + artifact.getId() + "." );
+                        emptySourceArtifacts.add( artifact.getArtifactId() );
                     }
                 }
             }
+
+            if ( shadeTestJar )
+            {
+                File file = resolveArtifactForClassifier( artifact, "tests" );
+                if ( file != null )
+                {
+                    if ( file.length() > 0 )
+                    {
+                        testArtifacts.add( file );
+                    }
+                    else
+                    {
+                        emptyTestArtifacts.add( artifact.getId() );
+                    }
+                }
+            }
+
+            if ( createTestSourcesJar )
+            {
+                File file = resolveArtifactForClassifier( artifact, "test-sources" );
+                if ( file != null )
+                {
+                    testSourceArtifacts.add( file );
+                }
+                else
+                {
+                    emptyTestSourceArtifacts.add( artifact.getId() );
+                }
+            }
+        }
+
+        for ( String artifactId : excludedArtifacts )
+        {
+            getLog().info( "Excluding " + artifactId + " from the shaded jar." );
+        }
+        for ( String artifactId : pomArtifacts )
+        {
+            getLog().info( "Skipping pom dependency " + artifactId + " in the shaded jar." );
+        }
+        for ( String artifactId : emptySourceArtifacts )
+        {
+            getLog().warn( "Skipping empty source jar " + artifactId + "." );
+        }
+        for ( String artifactId : emptyTestArtifacts )
+        {
+            getLog().warn( "Skipping empty test jar " + artifactId + "." );
+        }
+        for ( String artifactId : emptyTestArtifacts )
+        {
+            getLog().warn( "Skipping empty test source jar " + artifactId + "." );
         }
     }
 
@@ -695,34 +846,22 @@ public class ShadeMojo
     private void copyFiles( File source, File target )
         throws IOException
     {
-        InputStream in = null;
-        OutputStream out = null;
-        try
+        try ( InputStream in = new FileInputStream( source );
+              OutputStream out = new FileOutputStream( target ) )
         {
-            in = new FileInputStream( source );
-            out = new FileOutputStream( target );
             IOUtil.copy( in, out );
-            out.close();
-            out = null;
-            in.close();
-            in = null;
-        }
-        finally
-        {
-            IOUtil.close( in );
-            IOUtil.close( out );
         }
     }
 
-    private File resolveArtifactSources( Artifact artifact )
+    private File resolveArtifactForClassifier( Artifact artifact, String classifier )
     {
         DefaultArtifactCoordinate coordinate = new DefaultArtifactCoordinate();
         coordinate.setGroupId( artifact.getGroupId() );
         coordinate.setArtifactId( artifact.getArtifactId() );
         coordinate.setVersion( artifact.getVersion() );
         coordinate.setExtension( "jar" );
-        coordinate.setClassifier( "sources" );
-        
+        coordinate.setClassifier( classifier );
+
         Artifact resolvedArtifact;
         try
         {
@@ -731,7 +870,7 @@ public class ShadeMojo
         }
         catch ( ArtifactResolverException e )
         {
-            getLog().warn( "Could not get sources for " + artifact );
+            getLog().warn( "Could not get " + classifier + " for " + artifact );
             return null;
         }
 
@@ -744,7 +883,7 @@ public class ShadeMojo
 
     private List<Relocator> getRelocators()
     {
-        List<Relocator> relocators = new ArrayList<Relocator>();
+        List<Relocator> relocators = new ArrayList<>();
 
         if ( relocations == null )
         {
@@ -773,12 +912,12 @@ public class ShadeMojo
     private List<Filter> getFilters()
         throws MojoExecutionException
     {
-        List<Filter> filters = new ArrayList<Filter>();
-        List<SimpleFilter> simpleFilters = new ArrayList<SimpleFilter>();
+        List<Filter> filters = new ArrayList<>();
+        List<SimpleFilter> simpleFilters = new ArrayList<>();
 
         if ( this.filters != null && this.filters.length > 0 )
         {
-            Map<Artifact, ArtifactId> artifacts = new HashMap<Artifact, ArtifactId>();
+            Map<Artifact, ArtifactId> artifacts = new HashMap<>();
 
             artifacts.put( project.getArtifact(), new ArtifactId( project.getArtifact() ) );
 
@@ -791,7 +930,7 @@ public class ShadeMojo
             {
                 ArtifactId pattern = new ArtifactId( filter.getArtifact() );
 
-                Set<File> jars = new HashSet<File>();
+                Set<File> jars = new HashSet<>();
 
                 for ( Map.Entry<Artifact, ArtifactId> entry : artifacts.entrySet() )
                 {
@@ -803,7 +942,16 @@ public class ShadeMojo
 
                         if ( createSourcesJar )
                         {
-                            File file = resolveArtifactSources( artifact );
+                            File file = resolveArtifactForClassifier( artifact, "sources" );
+                            if ( file != null )
+                            {
+                                jars.add( file );
+                            }
+                        }
+
+                        if ( shadeTestJar )
+                        {
+                            File file = resolveArtifactForClassifier( artifact, "tests" );
                             if ( file != null )
                             {
                                 jars.add( file );
@@ -819,7 +967,7 @@ public class ShadeMojo
                     continue;
                 }
 
-                simpleFilters.add( new SimpleFilter( jars, filter.getIncludes(), filter.getExcludes() ) );
+                simpleFilters.add( new SimpleFilter( jars, filter ) );
             }
         }
 
@@ -852,21 +1000,38 @@ public class ShadeMojo
 
     private File shadedSourceArtifactFileWithClassifier()
     {
+        return shadedArtifactFileWithClassifier( "sources" );
+    }
+
+    private File shadedTestSourceArtifactFileWithClassifier()
+    {
+        return shadedArtifactFileWithClassifier( "test-sources" );
+    }
+
+    private File shadedArtifactFileWithClassifier( String classifier )
+    {
         Artifact artifact = project.getArtifact();
         final String shadedName = shadedArtifactId + "-" + artifact.getVersion() + "-" + shadedClassifierName
-            + "-sources." + artifact.getArtifactHandler().getExtension();
+            + "-" + classifier + "." + artifact.getArtifactHandler().getExtension();
         return new File( outputDirectory, shadedName );
     }
 
     private File shadedTestArtifactFileWithClassifier()
     {
-        Artifact artifact = project.getArtifact();
-        final String shadedName = shadedArtifactId + "-" + artifact.getVersion() + "-" + shadedClassifierName
-            + "-tests." + artifact.getArtifactHandler().getExtension();
-        return new File( outputDirectory, shadedName );
+        return shadedArtifactFileWithClassifier( "tests" );
     }
 
     private File shadedSourcesArtifactFile()
+    {
+        return shadedArtifactFile( "sources" );
+    }
+
+    private File shadedTestSourcesArtifactFile()
+    {
+        return shadedArtifactFile( "test-sources" );
+    }
+
+    private File shadedArtifactFile( String classifier )
     {
         Artifact artifact = project.getArtifact();
 
@@ -874,11 +1039,12 @@ public class ShadeMojo
 
         if ( project.getBuild().getFinalName() != null )
         {
-            shadedName = project.getBuild().getFinalName() + "-sources." + artifact.getArtifactHandler().getExtension();
+            shadedName = project.getBuild().getFinalName() + "-" + classifier + "."
+                + artifact.getArtifactHandler().getExtension();
         }
         else
         {
-            shadedName = shadedArtifactId + "-" + artifact.getVersion() + "-sources."
+            shadedName = shadedArtifactId + "-" + artifact.getVersion() + "-" + classifier + "."
                 + artifact.getArtifactHandler().getExtension();
         }
 
@@ -887,21 +1053,7 @@ public class ShadeMojo
 
     private File shadedTestArtifactFile()
     {
-        Artifact artifact = project.getArtifact();
-
-        String shadedName;
-
-        if ( project.getBuild().getFinalName() != null )
-        {
-            shadedName = project.getBuild().getFinalName() + "-tests." + artifact.getArtifactHandler().getExtension();
-        }
-        else
-        {
-            shadedName = shadedArtifactId + "-" + artifact.getVersion() + "-tests."
-                + artifact.getArtifactHandler().getExtension();
-        }
-
-        return new File( outputDirectory, shadedName );
+        return shadedArtifactFile( "tests" );
     }
 
     // We need to find the direct dependencies that have been included in the uber JAR so that we can modify the
@@ -909,11 +1061,7 @@ public class ShadeMojo
     private void createDependencyReducedPom( Set<String> artifactsToRemove )
         throws IOException, DependencyGraphBuilderException, ProjectBuildingException
     {
-        List<Dependency> dependencies = new ArrayList<Dependency>();
-
-        boolean modified = false;
-
-        List<Dependency> transitiveDeps = new ArrayList<Dependency>();
+        List<Dependency> transitiveDeps = new ArrayList<>();
 
         // NOTE: By using the getArtifacts() we get the completely evaluated artifacts
         // including the system scoped artifacts with expanded values of properties used.
@@ -931,39 +1079,48 @@ public class ShadeMojo
             // we'll figure out the exclusions in a bit.
             transitiveDeps.add( dep );
         }
-        List<Dependency> origDeps = project.getDependencies();
-
-        if ( promoteTransitiveDependencies )
-        {
-            origDeps = transitiveDeps;
-        }
 
         Model model = project.getOriginalModel();
+
+        // MSHADE-413: Must not use objects (for example `Model` or `Dependency`) that are "owned
+        // by Maven" and being used by other projects/plugins. Modifying those will break the
+        // correctness of the build - or cause an endless loop.
+        List<Dependency> origDeps = new ArrayList<>();
+        List<Dependency> source = promoteTransitiveDependencies ? transitiveDeps : project.getDependencies();
+        for ( Dependency d : source )
+        {
+            origDeps.add( d.clone() );
+        }
+        model = model.clone();
+
         // MSHADE-185: We will remove all system scoped dependencies which usually
         // have some kind of property usage. At this time the properties within
         // such things are already evaluated.
         List<Dependency> originalDependencies = model.getDependencies();
         removeSystemScopedDependencies( artifactsToRemove, originalDependencies );
 
+        List<Dependency> dependencies = new ArrayList<>();
+        boolean modified = false;
         for ( Dependency d : origDeps )
         {
-            dependencies.add( d );
-
-            String id = getId( d );
-
-            if ( artifactsToRemove.contains( id ) )
+            if ( artifactsToRemove.contains( getId( d ) ) )
             {
-                modified = true;
-
                 if ( keepDependenciesWithProvidedScope )
                 {
-                    d.setScope( "provided" );
+                    if ( !"provided".equals( d.getScope() ) )
+                    {
+                        modified = true;
+                        d.setScope( "provided" );
+                    }
                 }
                 else
                 {
-                    dependencies.remove( d );
+                    modified = true;
+                    continue;
                 }
             }
+
+            dependencies.add( d );
         }
 
         // MSHADE-155
@@ -1138,49 +1295,130 @@ public class ShadeMojo
                                          List<Dependency> transitiveDeps )
                                              throws DependencyGraphBuilderException
     {
-        DependencyNode node = dependencyGraphBuilder.buildDependencyGraph( project, null );
-        boolean modified = false;
-        for ( DependencyNode n2 : node.getChildren() )
+        MavenProject original = session.getProjectBuildingRequest().getProject();
+        try
         {
-            for ( DependencyNode n3 : n2.getChildren() )
+            session.getProjectBuildingRequest().setProject( project );
+            DependencyNode node = dependencyGraphBuilder
+                .buildDependencyGraph( session.getProjectBuildingRequest(), null );
+            boolean modified = false;
+            for ( DependencyNode n2 : node.getChildren() )
             {
-                // check if it really isn't in the list of original dependencies. Maven
-                // prior to 2.0.8 may grab versions from transients instead of
-                // from the direct deps in which case they would be marked included
-                // instead of OMITTED_FOR_DUPLICATE
+                String artifactId2 = getId( n2.getArtifact() );
 
-                // also, if not promoting the transitives, level 2's would be included
-                boolean found = false;
-                for ( Dependency dep : transitiveDeps )
+                for ( DependencyNode n3 : n2.getChildren() )
                 {
-                    if ( dep.getArtifactId().equals( n3.getArtifact().getArtifactId() )
-                        && dep.getGroupId().equals( n3.getArtifact().getGroupId() )
-                        && ( dep.getType() == null || dep.getType().equals( n3.getArtifact().getType() ) ) )
-                    {
-                        found = true;
-                        break;
-                    }
-                }
+                    Artifact artifact3 = n3.getArtifact();
+                    String artifactId3 = getId( artifact3 );
 
-                if ( !found )
-                {
-                    for ( Dependency dep : dependencies )
+                    // check if it really isn't in the list of original dependencies. Maven
+                    // prior to 2.0.8 may grab versions from transients instead of
+                    // from the direct deps in which case they would be marked included
+                    // instead of OMITTED_FOR_DUPLICATE
+
+                    // also, if not promoting the transitives, level 2's would be included
+                    boolean found = false;
+                    for ( Dependency dep : transitiveDeps )
                     {
-                        if ( dep.getArtifactId().equals( n2.getArtifact().getArtifactId() )
-                            && dep.getGroupId().equals( n2.getArtifact().getGroupId() )
-                            && ( dep.getType() == null || dep.getType().equals( n2.getArtifact().getType() ) ) )
+                        if ( getId( dep ).equals( artifactId3 ) )
                         {
-                            Exclusion exclusion = new Exclusion();
-                            exclusion.setArtifactId( n3.getArtifact().getArtifactId() );
-                            exclusion.setGroupId( n3.getArtifact().getGroupId() );
-                            dep.addExclusion( exclusion );
-                            modified = true;
+                            found = true;
                             break;
+                        }
+                    }
+
+                    // MSHADE-311: do not add exclusion for provided transitive dep
+                    //       note: MSHADE-31 introduced the exclusion logic for promoteTransitiveDependencies=true,
+                    //             but as of 3.2.1 promoteTransitiveDependencies has no effect for provided deps,
+                    //             which makes this fix even possible (see also MSHADE-181)
+                    if ( !found && !"provided".equals( artifact3.getScope() ) )
+                    {
+                        getLog().debug( String.format( "dependency %s (scope %s) not found in transitive dependencies",
+                            artifactId3, artifact3.getScope() ) );
+                        for ( Dependency dep : dependencies )
+                        {
+                            if ( getId( dep ).equals( artifactId2 ) )
+                            {
+                                // MSHADE-413: First check whether the exclusion has already been added,
+                                // because it's meaningless to add it more than once. Certain cases
+                                // can end up adding the exclusion "forever" and cause an endless loop
+                                // rewriting the whole dependency-reduced-pom.xml file.
+                                if ( !dependencyHasExclusion( dep, artifact3 ) )
+                                {
+                                    getLog().debug( String.format( "Adding exclusion for dependency %s (scope %s) "
+                                            + "to %s (scope %s)",
+                                        artifactId3, artifact3.getScope(),
+                                        getId( dep ), dep.getScope() ) );
+                                    Exclusion exclusion = new Exclusion();
+                                    exclusion.setArtifactId( artifact3.getArtifactId() );
+                                    exclusion.setGroupId( artifact3.getGroupId() );
+                                    dep.addExclusion( exclusion );
+                                    modified = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             }
+            return modified;
         }
-        return modified;
+        finally
+        {
+            // restore it
+            session.getProjectBuildingRequest().setProject( original );
+        }
+    }
+
+    private boolean dependencyHasExclusion( Dependency dep, Artifact exclusionToCheck )
+    {
+        boolean containsExclusion = false;
+        for ( Exclusion existingExclusion : dep.getExclusions() )
+        {
+            if ( existingExclusion.getGroupId().equals( exclusionToCheck.getGroupId() )
+                && existingExclusion.getArtifactId().equals( exclusionToCheck.getArtifactId() ) )
+            {
+                containsExclusion = true;
+                break;
+            }
+        }
+        return containsExclusion;
+    }
+
+    private List<ResourceTransformer> toResourceTransformers(
+            String shade, List<ResourceTransformer> resourceTransformers )
+    {
+         List<ResourceTransformer> forShade = new ArrayList<>();
+         ManifestResourceTransformer lastMt = null;
+         for ( ResourceTransformer transformer : resourceTransformers )
+         {
+             if ( !( transformer instanceof ManifestResourceTransformer )  )
+             {
+                 forShade.add( transformer );
+             }
+             else if ( ( ( ManifestResourceTransformer ) transformer ) .isForShade( shade ) )
+             {
+                 final ManifestResourceTransformer mt = (ManifestResourceTransformer) transformer;
+                 if ( mt.isUsedForDefaultShading() && lastMt != null && !lastMt.isUsedForDefaultShading() )
+                 {
+                     continue; // skip, we already have a specific transformer
+                 }
+                 if ( !mt.isUsedForDefaultShading() && lastMt != null && lastMt.isUsedForDefaultShading() )
+                 {
+                     forShade.remove( lastMt );
+                 }
+                 else if ( !mt.isUsedForDefaultShading() && lastMt != null )
+                 {
+                     getLog().warn( "Ambiguous manifest transformer definition for '" + shade + "': "
+                             + mt + " / " + lastMt );
+                 }
+                 if ( lastMt == null || !mt.isUsedForDefaultShading() )
+                 {
+                     lastMt = mt;
+                 }
+                 forShade.add( transformer );
+             }
+         }
+         return forShade;
     }
 }

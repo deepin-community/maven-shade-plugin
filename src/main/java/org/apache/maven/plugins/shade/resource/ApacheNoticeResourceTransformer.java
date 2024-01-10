@@ -27,7 +27,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.io.Writer;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -44,11 +43,11 @@ import java.util.jar.JarOutputStream;
  * Merges <code>META-INF/NOTICE.TXT</code> files.
  */
 public class ApacheNoticeResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
-    Set<String> entries = new LinkedHashSet<String>();
+    Set<String> entries = new LinkedHashSet<>();
 
-    Map<String, Set<String>> organizationEntries = new LinkedHashMap<String, Set<String>>();
+    Map<String, Set<String>> organizationEntries = new LinkedHashMap<>();
 
     String projectName = ""; // MSHADE-101 :: NullPointerException when projectName is missing
 
@@ -76,17 +75,23 @@ public class ApacheNoticeResourceTransformer
      */
     String encoding;
 
+    private long time = Long.MIN_VALUE;
+
     private static final String NOTICE_PATH = "META-INF/NOTICE";
 
     private static final String NOTICE_TXT_PATH = "META-INF/NOTICE.txt";
+    
+    private static final String NOTICE_MD_PATH = "META-INF/NOTICE.md";
 
     public boolean canTransformResource( String resource )
     {
-        return NOTICE_PATH.equalsIgnoreCase( resource ) || NOTICE_TXT_PATH.equalsIgnoreCase( resource );
+        return NOTICE_PATH.equalsIgnoreCase( resource ) 
+            || NOTICE_TXT_PATH.equalsIgnoreCase( resource ) 
+            || NOTICE_MD_PATH.equalsIgnoreCase( resource );
 
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         if ( entries.isEmpty() )
@@ -142,7 +147,7 @@ public class ApacheNoticeResourceTransformer
                             currentOrg = organizationEntries.get( sb.toString().trim() );
                             if ( currentOrg == null )
                             {
-                                currentOrg = new TreeSet<String>();
+                                currentOrg = new TreeSet<>();
                                 organizationEntries.put( sb.toString().trim(), currentOrg );
                             }
                             sb = new StringBuilder();
@@ -191,6 +196,10 @@ public class ApacheNoticeResourceTransformer
                 currentOrg.add( sb.toString() );
             }
         }
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public boolean hasTransformedResource()
@@ -201,18 +210,19 @@ public class ApacheNoticeResourceTransformer
     public void modifyOutputStream( JarOutputStream jos )
         throws IOException
     {
-        jos.putNextEntry( new JarEntry( NOTICE_PATH ) );
+        JarEntry jarEntry = new JarEntry( NOTICE_PATH );
+        jarEntry.setTime( time );
+        jos.putNextEntry( jarEntry );
 
-        Writer pow;
+        Writer writer;
         if ( StringUtils.isNotEmpty( encoding ) )
         {
-            pow = new OutputStreamWriter( jos, encoding );
+            writer = new OutputStreamWriter( jos, encoding );
         }
         else
         {
-            pow = new OutputStreamWriter( jos );
+            writer = new OutputStreamWriter( jos );
         }
-        PrintWriter writer = new PrintWriter( pow );
 
         int count = 0;
         for ( String line : entries )
@@ -225,26 +235,26 @@ public class ApacheNoticeResourceTransformer
 
             if ( count == 2 && copyright != null )
             {
-                writer.print( copyright );
-                writer.print( '\n' );
+                writer.write( copyright );
+                writer.write( '\n' );
             }
             else
             {
-                writer.print( line );
-                writer.print( '\n' );
+                writer.write( line );
+                writer.write( '\n' );
             }
             if ( count == 3 )
             {
                 //do org stuff
                 for ( Map.Entry<String, Set<String>> entry : organizationEntries.entrySet() )
                 {
-                    writer.print( entry.getKey() );
-                    writer.print( '\n' );
+                    writer.write( entry.getKey() );
+                    writer.write( '\n' );
                     for ( String l : entry.getValue() )
                     {
-                        writer.print( l );
+                        writer.write( l );
                     }
-                    writer.print( '\n' );
+                    writer.write( '\n' );
                 }
             }
         }

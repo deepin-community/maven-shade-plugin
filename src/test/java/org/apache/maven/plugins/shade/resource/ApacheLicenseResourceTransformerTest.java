@@ -21,16 +21,18 @@ package org.apache.maven.plugins.shade.resource;
 
 import java.util.Locale;
 
-import junit.framework.TestCase;
+import org.junit.Before;
+import org.junit.Test;
+
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test for {@link ApacheLicenseResourceTransformer}.
  * 
  * @author Benjamin Bentmann
- * @version $Id$
  */
 public class ApacheLicenseResourceTransformerTest
-    extends TestCase
 {
 
     private ApacheLicenseResourceTransformer transformer;
@@ -44,17 +46,20 @@ public class ApacheLicenseResourceTransformerTest
         Locale.setDefault( new Locale( "tr" ) );
     }
 
+    @Before
     public void setUp()
     {
-        this.transformer = new ApacheLicenseResourceTransformer();
+        transformer = new ApacheLicenseResourceTransformer();
     }
 
+    @Test
     public void testCanTransformResource()
     {
-        assertTrue( this.transformer.canTransformResource( "META-INF/LICENSE" ) );
-        assertTrue( this.transformer.canTransformResource( "META-INF/LICENSE.TXT" ) );
-        assertTrue( this.transformer.canTransformResource( "META-INF/License.txt" ) );
-        assertFalse( this.transformer.canTransformResource( "META-INF/MANIFEST.MF" ) );
+        assertTrue( transformer.canTransformResource( "META-INF/LICENSE" ) );
+        assertTrue( transformer.canTransformResource( "META-INF/LICENSE.TXT" ) );
+        assertTrue( transformer.canTransformResource( "META-INF/LICENSE.md" ) );
+        assertTrue( transformer.canTransformResource( "META-INF/License.txt" ) );
+        assertFalse( transformer.canTransformResource( "META-INF/MANIFEST.MF" ) );
     }
 
 }

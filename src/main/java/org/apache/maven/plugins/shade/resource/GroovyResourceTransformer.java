@@ -36,37 +36,38 @@ import java.util.jar.JarOutputStream;
  * Aggregate Apache Groovy extension modules descriptors
  */
 public class GroovyResourceTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
 
-    static final String EXT_MODULE_NAME = "META-INF/services/org.codehaus.groovy.runtime.ExtensionModule";
+    static final String EXT_MODULE_NAME_LEGACY = "META-INF/services/org.codehaus.groovy.runtime.ExtensionModule";
 
-    private List<String> extensionClassesList = new ArrayList<String>();
+    // Since Groovy 2.5.x/Java 9 META-INF/services may only be used by Service Providers
+    static final String EXT_MODULE_NAME = "META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule";
 
-    private List<String> staticExtensionClassesList = new ArrayList<String>();
+    private List<String> extensionClassesList = new ArrayList<>();
+
+    private List<String> staticExtensionClassesList = new ArrayList<>();
 
     private String extModuleName = "no-module-name";
 
     private String extModuleVersion = "1.0";
 
+    private long time = Long.MIN_VALUE;
+
     @Override
     public boolean canTransformResource( String resource )
     {
-        return EXT_MODULE_NAME.equals( resource );
+        return EXT_MODULE_NAME.equals( resource ) || EXT_MODULE_NAME_LEGACY.equals( resource );
     }
 
     @Override
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         Properties out = new Properties();
-        try
+        try ( InputStream props = is )
         {
-            out.load( is );
-        }
-        finally
-        {
-            is.close();
+            out.load( props );
         }
         String extensionClasses = out.getProperty( "extensionClasses", "" ).trim();
         if ( extensionClasses.length() > 0 )
@@ -77,6 +78,10 @@ public class GroovyResourceTransformer
         if ( staticExtensionClasses.length() > 0 )
         {
             append( staticExtensionClasses, staticExtensionClassesList );
+        }
+        if ( time > this.time )
+        {
+            this.time = time;        
         }
     }
 
@@ -100,7 +105,10 @@ public class GroovyResourceTransformer
     {
         if ( hasTransformedResource() )
         {
-            os.putNextEntry( new JarEntry( EXT_MODULE_NAME ) );
+            JarEntry jarEntry = new JarEntry( EXT_MODULE_NAME );
+            jarEntry.setTime( time );
+            os.putNextEntry( jarEntry );
+
             Properties desc = new Properties();
             desc.put( "moduleName", extModuleName );
             desc.put( "moduleVersion", extModuleVersion );

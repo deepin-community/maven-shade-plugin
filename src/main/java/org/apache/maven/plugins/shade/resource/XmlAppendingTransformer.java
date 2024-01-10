@@ -44,7 +44,7 @@ import org.xml.sax.SAXException;
  * Appends multiple occurrences of some XML file.
  */
 public class XmlAppendingTransformer
-    implements ResourceTransformer
+    extends AbstractCompatibilityTransformer
 {
     public static final String XSI_NS = "http://www.w3.org/2001/XMLSchema-instance";
 
@@ -54,17 +54,14 @@ public class XmlAppendingTransformer
 
     Document doc;
 
+    private long time = Long.MIN_VALUE;
+
     public boolean canTransformResource( String r )
     {
-        if ( resource != null && resource.equalsIgnoreCase( r ) )
-        {
-            return true;
-        }
-
-        return false;
+        return resource != null && resource.equalsIgnoreCase( r );
     }
 
-    public void processResource( String resource, InputStream is, List<Relocator> relocators )
+    public void processResource( String resource, InputStream is, List<Relocator> relocators, long time )
         throws IOException
     {
         Document r;
@@ -119,6 +116,11 @@ public class XmlAppendingTransformer
                 doc.getRootElement().addContent( n );
             }
         }
+
+        if ( time > this.time )
+        {
+            this.time = time;        
+        }
     }
 
     public boolean hasTransformedResource()
@@ -129,7 +131,9 @@ public class XmlAppendingTransformer
     public void modifyOutputStream( JarOutputStream jos )
         throws IOException
     {
-        jos.putNextEntry( new JarEntry( resource ) );
+        JarEntry jarEntry = new JarEntry( resource );
+        jarEntry.setTime( time );
+        jos.putNextEntry( jarEntry );
 
         new XMLOutputter( Format.getPrettyFormat() ).output( doc, jos );
 
